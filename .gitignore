@@ -1,0 +1,56 @@
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Environment Variables
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Node / Frontend
+node_modules/
+.pnp
+.pnp.js
+coverage/
+.next/
+out/
+dist/
+build/
+
+# Turborepo / Cache
+.turbo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker / DB data
+postgres_data/
+redis_data/

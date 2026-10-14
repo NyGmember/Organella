@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OrganellaModuleManifest",
+  "description": "Validation schema for Organella Module Manifest (module.json)",
+  "type": "object",
+  "required": ["id", "name", "version", "description", "permissions"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Unique identifier for the module (kebab-case)"
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable name of the module"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic versioning (e.g. 1.0.0)"
+    },
+    "author": { "type": "string" },
+    "license": { "type": "string", "default": "AGPL-3.0" },
+    "description": { "type": "string" },
+    "minCoreVersion": { "type": "string" },
+    "permissions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Required RBAC permissions to operate this module"
+    },
+    "frontend": {
+      "type": "object",
+      "required": ["entry", "slots"],
+      "properties": {
+        "entry": {
+          "type": "string",
+          "description": "URL or relative path to the remoteEntry.js bundle"
+        },
+        "slots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["slotId", "title", "component"],
+            "properties": {
+              "slotId": { "type": "string" },
+              "title": { "type": "string" },
+              "component": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "properties": {
+        "pluginPackage": { "type": "string" },
+        "apiPrefix": { "type": "string" },
+        "hooks": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/organella-health/organella/main/docs/modules/module-manifest-schema.json",
+  "id": "doctor-opd",
+  "name": "Doctor OPD & Clinical Notes",
+  "version": "1.0.0",
+  "author": "Organella Community",
+  "license": "AGPL-3.0",
+  "description": "ระบบห้องตรวจแพทย์ บันทึก SOAP Note, วินิจฉัยโรค ICD-10 และสั่งการรักษา",
+  "minCoreVersion": "1.0.0",
+  "permissions": [
+    "patient:read",
+    "encounter:write",
+    "condition:write",
+    "medication:write"
+  ],
+  "frontend": {
+    "entry": "http://localhost:5001/assets/remoteEntry.js",
+    "slots": [
+      {
+        "slotId": "patient-workspace-tab",
+        "title": "ห้องตรวจ (Doctor Note)",
+        "component": "./ConsultationTab"
+      },
+      {
+        "slotId": "dashboard-widget",
+        "title": "รายชื่อรอตรวจของแพทย์",
+        "component": "./DoctorQueueWidget"
+      }
+    ]
+  },
+  "backend": {
+    "pluginPackage": "modules.doctor_opd",
+    "apiPrefix": "/api/v1/modules/doctor-opd",
+    "hooks": [
+      "on_patient_admitted",
+      "on_encounter_closed"
+    ]
+  }
+}
