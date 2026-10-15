@@ -8,10 +8,40 @@ export interface RegisteredSlotItem {
   Component: React.ComponentType<any>;
 }
 
+// Fallback loader that safely attempts remote federation first, and falls back to local workspace package
+function createSafeFederatedComponent(
+  remoteLoader: () => Promise<{ default: React.ComponentType<any> }>,
+  localFallbackLoader: () => Promise<{ default: React.ComponentType<any> }>
+) {
+  return lazy(async () => {
+    try {
+      return await remoteLoader();
+    } catch (err) {
+      console.warn(
+        '[SlotRegistry] Remote federation entry unavailable, falling back to local module package:',
+        err
+      );
+      return await localFallbackLoader();
+    }
+  });
+}
+
 // Static resolver for first-party/federated showcase modules
-const federatedComponentMap: Record<string, () => Promise<{ default: React.ComponentType<any> }>> = {
-  'doctor-opd:./ConsultationTab': () => import('doctor_opd/ConsultationTab'),
-  'doctor-opd:./DoctorQueueWidget': () => import('doctor_opd/DoctorQueueWidget'),
+const federatedComponentMap: Record<string, React.ComponentType<any>> = {
+  'doctor-opd:./ConsultationTab': createSafeFederatedComponent(
+    () => import('doctor_opd/ConsultationTab'),
+    async () => {
+      const mod = await import('@organella-module/doctor-opd');
+      return { default: mod.ConsultationTab };
+    }
+  ),
+  'doctor-opd:./DoctorQueueWidget': createSafeFederatedComponent(
+    () => import('doctor_opd/DoctorQueueWidget'),
+    async () => {
+      const mod = await import('@organella-module/doctor-opd');
+      return { default: mod.DoctorQueueWidget };
+    }
+  ),
 };
 
 export function resolveSlotComponents(
@@ -28,14 +58,14 @@ export function resolveSlotComponents(
     for (const slotDecl of manifest.frontend.slots) {
       if (slotDecl.slotId === slotId) {
         const lookupKey = `${manifest.id}:${slotDecl.component}`;
-        const loader = federatedComponentMap[lookupKey];
+        const Component = federatedComponentMap[lookupKey];
 
-        if (loader) {
+        if (Component) {
           matchedItems.push({
             moduleId: manifest.id,
             slotId: slotDecl.slotId,
             title: slotDecl.title,
-            Component: lazy(loader),
+            Component,
           });
         }
       }
