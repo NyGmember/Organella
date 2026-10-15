@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     secret_key: str = "organella_insecure_development_secret_key_change_in_production"
     allowed_origins: str = "http://localhost:3000,http://localhost:5001"
 
+    # Security
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+    refresh_token_expire_days: int = 7
+
     # Database
     database_url: str = (
         "postgresql+asyncpg://organella:organella_secret_change_me@localhost:5432/organella_core"

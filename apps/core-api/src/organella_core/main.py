@@ -1,6 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from organella_core.api.v1.auth import router as auth_router
+from organella_core.api.v1.fhir import router as fhir_router
+from organella_core.api.v1.patients import router as patients_router
 from organella_core.config import settings
 
 app = FastAPI(
@@ -20,6 +23,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include Core API Routers
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(patients_router, prefix="/api/v1")
+app.include_router(fhir_router)
 
 
 @app.get("/health", tags=["System"])
