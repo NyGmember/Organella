@@ -79,6 +79,16 @@ async def create_patient(
         details={"hn": new_patient.hn, "name": f"{new_patient.first_name} {new_patient.last_name}"},
     )
 
+    # Publish Redis Event Bus Hook for Modules
+    from organella_core.services.event_bus import publish_patient_event
+
+    await publish_patient_event(
+        event_name="on_patient_registered",
+        patient_id=str(new_patient.id),
+        hn=new_patient.hn,
+        details={"name": f"{new_patient.first_name} {new_patient.last_name}"},
+    )
+
     return new_patient
 
 
