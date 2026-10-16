@@ -42,6 +42,16 @@ const federatedComponentMap: Record<string, React.ComponentType<any>> = {
       return { default: mod.DoctorQueueWidget };
     }
   ),
+  'pharmacy-dispense:./WorkspaceTab': createSafeFederatedComponent(
+    async () => {
+      const mod = await import('@organella-module/pharmacy-dispense');
+      return { default: mod.WorkspaceTab };
+    },
+    async () => {
+      const mod = await import('@organella-module/pharmacy-dispense');
+      return { default: mod.WorkspaceTab };
+    }
+  ),
 };
 
 export function resolveSlotComponents(

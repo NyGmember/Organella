@@ -483,10 +483,12 @@ async def seed_database():
         print("[Organella Seed] Starting database seeding...")
         await ensure_master_data_and_rbac(db)
         from organella_core.api.v1.doctor_opd import ensure_sample_opd_queue
+        from organella_core.services.module_manager import scan_and_sync_local_modules
 
         await ensure_sample_opd_queue(db)
+        await scan_and_sync_local_modules(db)
         print(
-            "[Organella Seed] Seeded 6 Hospital Roles, 20 Grouped Permissions, Master ICD-10, Drug Formulary & OPD Queue!"
+            "[Organella Seed] Seeded 6 Hospital Roles, 20 Grouped Permissions, Master ICD-10, Drug Formulary, Modules & OPD Queue!"
         )
 
 

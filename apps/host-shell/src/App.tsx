@@ -98,6 +98,25 @@ const fallbackDoctorOpdManifest: ModuleManifest = {
   },
 };
 
+const fallbackPharmacyManifest: ModuleManifest = {
+  id: 'pharmacy-dispense',
+  name: 'Pharmacy Dispensing & Drug Safety',
+  version: '0.1.0',
+  author: 'Organella Community',
+  description: 'ระบบห้องจ่ายยาผู้ป่วยนอก ตรวจสอบแพ้ยา และยืนยันการจ่ายยา',
+  permissions: ['patient:read', 'medication:read', 'medication:dispense'],
+  frontend: {
+    entry: 'http://localhost:5002/assets/remoteEntry.js',
+    slots: [
+      {
+        slotId: 'patient-workspace-tab',
+        title: 'ห้องจ่ายยา (Pharmacy Dispense)',
+        component: './WorkspaceTab',
+      },
+    ],
+  },
+};
+
 const DEMO_ACCOUNTS = [
   {
     username: 'dr.thanakorn',
@@ -187,7 +206,10 @@ export function App() {
   );
   const [conditions, setConditions] = useState<ClinicalConditionInput[]>(initialConditions);
   const [medications, setMedications] = useState<ClinicalMedicationInput[]>(initialMedications);
-  const [activeModules, setActiveModules] = useState<ModuleManifest[]>([fallbackDoctorOpdManifest]);
+  const [activeModules, setActiveModules] = useState<ModuleManifest[]>([
+    fallbackDoctorOpdManifest,
+    fallbackPharmacyManifest,
+  ]);
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<string>('doctor-opd');
   const [events, setEvents] = useState<Array<{ name: string; time: string; data: any }>>([]);
 
@@ -267,7 +289,8 @@ export function App() {
         if (res.ok) {
           const data: ModuleManifest[] = await res.json();
           if (data && data.length > 0) {
-            setActiveModules(data);
+            const hasPharm = data.some((m) => m.id === 'pharmacy-dispense');
+            setActiveModules(hasPharm ? data : [...data, fallbackPharmacyManifest]);
           }
         }
       } catch {

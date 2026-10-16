@@ -1,0 +1,22 @@
+{
+  "id": "pharmacy-dispense",
+  "name": "Pharmacy Dispensing & Drug Safety",
+  "version": "0.1.0",
+  "author": "Organella Community",
+  "description": "Pharmacy Dispensing & Drug Safety — Micro-Frontend Extension Module for Organella",
+  "permissions": [
+    "patient:read",
+    "medication:read",
+    "medication:dispense"
+  ],
+  "frontend": {
+    "entry": "http://localhost:5002/assets/remoteEntry.js",
+    "slots": [
+      {
+        "slotId": "patient-workspace-tab",
+        "title": "ห้องจ่ายยา (Pharmacy Dispense)",
+        "component": "./WorkspaceTab"
+      }
+    ]
+  }
+}

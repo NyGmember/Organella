@@ -183,6 +183,30 @@ async def test_strict_role_list_guard_and_consultation_workflow():
         assert bundle["resourceType"] == "Bundle"
         assert bundle["total"] == 6
 
+        # 6. Verify Pharmacy Dispense Role-List Guard:
+        # Doctor lacks 'medication:dispense' -> 403 with missing_roles: ['medication:dispense']
+        doc_dispense_attempt = await client.post(
+            f"/api/v1/modules/doctor-opd/encounters/{encounter_number}/dispense",
+            headers=doc_headers,
+        )
+        assert doc_dispense_attempt.status_code == 403
+        assert doc_dispense_attempt.json()["detail"]["missing_roles"] == ["medication:dispense"]
+
+        # Pharmacist has ['patient:read', 'medication:read', 'medication:dispense'] -> 200 OK
+        pharm_login = await client.post(
+            "/api/v1/auth/login", data={"username": "pharm.wichai", "password": "pharm12345"}
+        )
+        pharm_token = pharm_login.json()["access_token"]
+        pharm_headers = {"Authorization": f"Bearer {pharm_token}"}
+
+        dispense_res = await client.post(
+            f"/api/v1/modules/doctor-opd/encounters/{encounter_number}/dispense",
+            headers=pharm_headers,
+        )
+        assert dispense_res.status_code == 200
+        dispensed_enc = dispense_res.json()
+        assert all(m["status"] == "completed" for m in dispensed_enc["medications"])
+
 
 @pytest.mark.asyncio
 async def test_grouped_permissions_and_master_data_csv_import():

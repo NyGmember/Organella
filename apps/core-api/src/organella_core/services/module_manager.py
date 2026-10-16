@@ -94,6 +94,8 @@ async def scan_and_sync_local_modules(
     for item in modules_root_dir.iterdir():
         if item.is_dir():
             manifest_file = item / "module.json"
+            if not manifest_file.exists():
+                manifest_file = item / "manifest.json"
             if manifest_file.exists():
                 try:
                     with open(manifest_file, "r", encoding="utf-8") as f:

@@ -719,3 +719,78 @@ async def save_opd_consultation(
         )
 
     return encounter
+
+
+@router.post("/encounters/{encounter_number}/dispense", response_model=EncounterResponse)
+async def dispense_opd_medications(
+    encounter_number: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[
+        User,
+        Depends(
+            require_permissions(
+                [
+                    "patient:read",
+                    "medication:read",
+                    "medication:dispense",
+                ]
+            )
+        ),
+    ],
+):
+    """
+    Pharmacy Dispensing Endpoint:
+    Requires ALL of ['patient:read', 'medication:read', 'medication:dispense'].
+    Verifies and marks all medication orders in the encounter as 'dispensed' (completed).
+    """
+    stmt = (
+        select(Encounter)
+        .options(selectinload(Encounter.conditions), selectinload(Encounter.medications))
+        .where(Encounter.encounter_number == encounter_number)
+    )
+    res = await db.execute(stmt)
+    encounter = res.scalar_one_or_none()
+    if not encounter:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"OPD Encounter '{encounter_number}' not found",
+        )
+
+    for med in encounter.medications:
+        med.status = "completed"
+
+    await db.commit()
+    await db.refresh(encounter)
+
+    await log_audit_event(
+        db=db,
+        action="DISPENSE_OPD_MEDICATIONS",
+        resource_type="Encounter",
+        resource_id=str(encounter.id),
+        user_id=current_user.id,
+        user_name=f"{current_user.full_name} ({current_user.license_number or current_user.username})",
+        user_role=",".join(r.name for r in current_user.roles),
+        client_ip=request.client.host if request.client else None,
+        module_id="@organella-module/pharmacy-dispense",
+        details={
+            "encounter_number": encounter.encounter_number,
+            "dispensed_by": current_user.username,
+            "pharmacist_license": current_user.license_number,
+            "medications_dispensed": [m.medication_name for m in encounter.medications],
+        },
+    )
+
+    await publish_event(
+        channel="organella:clinical_events",
+        event_name="on_medication_dispensed",
+        payload={
+            "encounter_id": str(encounter.id),
+            "encounter_number": encounter.encounter_number,
+            "dispensed_by": current_user.username,
+            "pharmacist_license": current_user.license_number,
+            "count": len(encounter.medications),
+        },
+    )
+
+    return encounter
