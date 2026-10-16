@@ -284,3 +284,107 @@ async def test_grouped_permissions_and_master_data_csv_import():
         )
         assert pat_import.status_code == 200
         assert pat_import.json()["total_processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_phase5_reception_checkin_and_nursing_triage_workflow():
+    """
+    Phase 5 (ORG-6) Verification:
+    1. Pharmacist lacking 'queue:manage' gets 403 with missing_roles=['queue:manage'] on POST /checkin.
+    2. Receptionist ('reg.somporn') with ['patient:read', 'queue:manage'] checks in a patient (201) -> status='arrived'.
+    3. Receptionist lacking 'triage:write' gets 403 with missing_roles=['triage:write'] on POST /triage.
+    4. Triage Nurse ('nurse.suda') records Vital Signs + Allergies -> auto-calculates BMI and transitions status to 'triaged'.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        q_res = await client.get("/api/v1/modules/doctor-opd/queue")
+        assert q_res.status_code == 200
+        patient_id = q_res.json()[0]["patient_id"]
+
+        # 1. Pharmacist tries to check in patient -> 403 missing_roles: ['queue:manage']
+        pharm_login = await client.post(
+            "/api/v1/auth/login", data={"username": "pharm.wichai", "password": "pharm12345"}
+        )
+        pharm_headers = {"Authorization": f"Bearer {pharm_login.json()['access_token']}"}
+
+        pharm_checkin = await client.post(
+            "/api/v1/modules/doctor-opd/checkin",
+            json={
+                "patient_id": patient_id,
+                "department": "อายุรกรรมทั่วไป (OPD Med Rm.3)",
+                "priority": "urgent",
+                "chief_complaint": "แน่นหน้าอก หายใจเหนื่อย",
+            },
+            headers=pharm_headers,
+        )
+        assert pharm_checkin.status_code == 403
+        assert pharm_checkin.json()["detail"]["missing_roles"] == ["queue:manage"]
+
+        # 2. Receptionist checks in patient -> 201 Created
+        reg_login = await client.post(
+            "/api/v1/auth/login", data={"username": "reg.somporn", "password": "reg12345"}
+        )
+        reg_headers = {"Authorization": f"Bearer {reg_login.json()['access_token']}"}
+
+        checkin_res = await client.post(
+            "/api/v1/modules/doctor-opd/checkin",
+            json={
+                "patient_id": patient_id,
+                "department": "อายุรกรรมทั่วไป (OPD Med Rm.3)",
+                "priority": "urgent",
+                "chief_complaint": "มาตรวจอาการแน่นหน้าอกและเวียนศีรษะ",
+            },
+            headers=reg_headers,
+        )
+        assert checkin_res.status_code == 201
+        new_queue = checkin_res.json()
+        assert new_queue["status"] == "arrived"
+        assert new_queue["queue_number"].startswith("U-")
+        new_enc_num = new_queue["encounter_number"]
+
+        # 3. Receptionist tries to save Nursing Triage -> 403 missing_roles: ['triage:write']
+        reg_triage_attempt = await client.post(
+            "/api/v1/modules/doctor-opd/triage",
+            json={
+                "encounter_number": new_enc_num,
+                "patient_id": patient_id,
+                "chief_complaint": "เวชระเบียนพยายามบันทึกสัญญาณชีพ",
+                "vital_signs": {"weight": 72.0, "height": 170.0},
+            },
+            headers=reg_headers,
+        )
+        assert reg_triage_attempt.status_code == 403
+        assert reg_triage_attempt.json()["detail"]["missing_roles"] == ["triage:write"]
+
+        # 4. Triage Nurse records Vital Signs & Allergies -> 200 OK, auto-BMI = 24.9, status = 'triaged'
+        nurse_login = await client.post(
+            "/api/v1/auth/login", data={"username": "nurse.suda", "password": "nurse12345"}
+        )
+        nurse_headers = {"Authorization": f"Bearer {nurse_login.json()['access_token']}"}
+
+        triage_ok = await client.post(
+            "/api/v1/modules/doctor-opd/triage",
+            json={
+                "encounter_number": new_enc_num,
+                "patient_id": patient_id,
+                "chief_complaint": "พยาบาลคัดกรอง: เวียนศีรษะ ความดันสูงเล็กน้อย",
+                "priority": "urgent",
+                "allergies": ["Penicillin (ผื่นลมพิษเฉียบพลัน)", "Aspirin (หลอดลมตีบ)"],
+                "vital_signs": {
+                    "bp_systolic": 144,
+                    "bp_diastolic": 92,
+                    "pulse": 88,
+                    "temperature": 37.1,
+                    "respiratory_rate": 20,
+                    "spo2": 98,
+                    "weight": 72.0,
+                    "height": 170.0,
+                    "pain_score": 3,
+                },
+            },
+            headers=nurse_headers,
+        )
+        assert triage_ok.status_code == 200
+        triaged_enc = triage_ok.json()
+        assert triaged_enc["status"] == "triaged"
+        assert triaged_enc["vital_signs"]["bmi"] == 24.9
+        assert triaged_enc["vital_signs"]["pain_score"] == 3

@@ -19,7 +19,9 @@ from organella_core.schemas.clinical import (
     EncounterResponse,
     ICD10CodeItem,
     MedicationOrderResponse,
+    QueueCheckInCreate,
     QueueItemResponse,
+    QueueStatusUpdate,
     VitalSignsSchema,
 )
 from organella_core.schemas.master_data import MedicationMasterResponse
@@ -39,6 +41,8 @@ class TriageUpdatePayload(BaseModel):
     chief_complaint: str = Field(..., min_length=1)
     vital_signs: VitalSignsSchema = Field(default_factory=VitalSignsSchema)
     priority: str = Field(default="routine")
+    department: Optional[str] = None
+    allergies: Optional[List[str]] = None
 
 
 # Standard ICD-10-TM / WHO Reference Dictionary fallback
@@ -482,6 +486,174 @@ async def get_opd_encounter(
     return encounter
 
 
+@router.post("/checkin", response_model=QueueItemResponse, status_code=status.HTTP_201_CREATED)
+async def checkin_patient_to_opd_queue(
+    payload: QueueCheckInCreate,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permissions(["patient:read", "queue:manage"]))],
+):
+    """
+    Reception Check-In & Queue Issuance Endpoint:
+    Requires ALL of ['patient:read', 'queue:manage'].
+    Creates a new OPD Encounter in 'arrived' status and assigns the next sequential Queue Number.
+    """
+    pat_res = await db.execute(select(Patient).where(Patient.id == payload.patient_id))
+    patient = pat_res.scalar_one_or_none()
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Patient '{payload.patient_id}' not found in MPI",
+        )
+
+    # Determine next sequential encounter & queue number
+    all_encs_res = await db.execute(select(Encounter.encounter_number, Encounter.queue_number))
+    all_rows = all_encs_res.all()
+    next_idx = len(all_rows) + 15
+    prefix_char = (
+        "S" if payload.priority == "stat" else ("U" if payload.priority == "urgent" else "A")
+    )
+    queue_number = f"{prefix_char}-{next_idx:03d}"
+    now_utc = datetime.now(timezone.utc)
+    encounter_number = f"ENC-{now_utc.strftime('%Y')}-{len(all_rows) + 1:03d}"
+    # Ensure uniqueness if encounter_number already exists
+    existing_enc_nums = {r[0] for r in all_rows}
+    if encounter_number in existing_enc_nums:
+        encounter_number = f"ENC-{now_utc.strftime('%Y%m%d')}-{uuid.uuid4().hex[:5].upper()}"
+
+    encounter = Encounter(
+        encounter_number=encounter_number,
+        patient_id=patient.id,
+        encounter_type="OPD",
+        status="arrived",
+        priority=payload.priority,
+        department=payload.department,
+        queue_number=queue_number,
+        chief_complaint=payload.chief_complaint or "รอซักประวัติและวัดสัญญาณชีพที่จุดคัดกรอง",
+        vital_signs={},
+        soap_note={},
+    )
+    db.add(encounter)
+    await db.commit()
+    await db.refresh(encounter)
+
+    await log_audit_event(
+        db=db,
+        action="CHECKIN_OPD_QUEUE",
+        resource_type="Encounter",
+        resource_id=str(encounter.id),
+        user_id=current_user.id,
+        user_name=f"{current_user.full_name} ({current_user.username})",
+        user_role=",".join(r.name for r in current_user.roles),
+        client_ip=request.client.host if request.client else None,
+        module_id="@organella-module/reception-triage",
+        details={
+            "encounter_number": encounter.encounter_number,
+            "queue_number": encounter.queue_number,
+            "patient_hn": patient.hn,
+            "department": encounter.department,
+            "priority": encounter.priority,
+        },
+    )
+
+    await publish_event(
+        channel="organella:clinical_events",
+        event_name="on_patient_checked_in",
+        payload={
+            "encounter_id": str(encounter.id),
+            "encounter_number": encounter.encounter_number,
+            "queue_number": encounter.queue_number,
+            "patient_id": str(patient.id),
+            "hn": patient.hn,
+            "department": encounter.department,
+            "priority": encounter.priority,
+            "checked_in_by": current_user.username,
+        },
+    )
+
+    prefix_str = f"{patient.prefix} " if patient.prefix else ""
+    full_name = f"{prefix_str}{patient.first_name} {patient.last_name}".strip()
+    return QueueItemResponse(
+        encounter_id=encounter.id,
+        encounter_number=encounter.encounter_number,
+        queue_number=encounter.queue_number or queue_number,
+        status=encounter.status,
+        priority=encounter.priority,
+        department=encounter.department,
+        chief_complaint=encounter.chief_complaint,
+        started_at=encounter.started_at,
+        patient_id=patient.id,
+        hn=patient.hn,
+        patient_name=full_name,
+        gender=patient.gender,
+        birth_date=patient.birth_date.isoformat(),
+        blood_group=patient.blood_group,
+        allergies=patient.allergies or [],
+        vital_signs=encounter.vital_signs or {},
+        soap_note=encounter.soap_note or {},
+        conditions=[],
+        medications=[],
+    )
+
+
+@router.patch("/encounters/{encounter_number}/status", response_model=EncounterResponse)
+async def update_opd_queue_status(
+    encounter_number: str,
+    payload: QueueStatusUpdate,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permissions(["patient:read", "queue:manage"]))],
+):
+    """
+    Queue Status Management Endpoint:
+    Requires ALL of ['patient:read', 'queue:manage'].
+    Allows Reception or Triage staff to transition queue status or reassign department/priority.
+    """
+    enc_res = await db.execute(
+        select(Encounter)
+        .options(selectinload(Encounter.conditions), selectinload(Encounter.medications))
+        .where(Encounter.encounter_number == encounter_number)
+    )
+    encounter = enc_res.scalar_one_or_none()
+    if not encounter:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"OPD Encounter '{encounter_number}' not found",
+        )
+
+    old_status = encounter.status
+    encounter.status = payload.status
+    if payload.priority:
+        encounter.priority = payload.priority
+    if payload.department:
+        encounter.department = payload.department
+    if payload.status == "finished" and not encounter.ended_at:
+        encounter.ended_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(encounter)
+
+    await log_audit_event(
+        db=db,
+        action="UPDATE_OPD_QUEUE_STATUS",
+        resource_type="Encounter",
+        resource_id=str(encounter.id),
+        user_id=current_user.id,
+        user_name=f"{current_user.full_name} ({current_user.username})",
+        user_role=",".join(r.name for r in current_user.roles),
+        client_ip=request.client.host if request.client else None,
+        module_id="@organella-module/reception-triage",
+        details={
+            "encounter_number": encounter.encounter_number,
+            "old_status": old_status,
+            "new_status": encounter.status,
+            "priority": encounter.priority,
+            "department": encounter.department,
+        },
+    )
+    return encounter
+
+
 @router.post("/triage", response_model=EncounterResponse)
 async def save_opd_triage(
     payload: TriageUpdatePayload,
@@ -491,8 +663,8 @@ async def save_opd_triage(
 ):
     """
     Nursing Triage Endpoint:
-    Allows staff with ['patient:read', 'triage:write'] to record Chief Complaint and Vital Signs
-    WITHOUT altering medical SOAP notes, ICD-10 diagnoses, or prescriptions.
+    Allows staff with ['patient:read', 'triage:write'] to record Chief Complaint, Vital Signs (with auto-BMI),
+    and Drug Allergy screening WITHOUT altering medical SOAP notes, ICD-10 diagnoses, or prescriptions.
     """
     enc_res = await db.execute(
         select(Encounter)
@@ -506,11 +678,25 @@ async def save_opd_triage(
             detail=f"OPD Encounter '{payload.encounter_number}' not found",
         )
 
+    vitals_dict = payload.vital_signs.model_dump()
+    w = vitals_dict.get("weight")
+    h = vitals_dict.get("height")
+    if w and h and float(w) > 0 and float(h) > 0:
+        vitals_dict["bmi"] = round(float(w) / ((float(h) / 100.0) ** 2), 1)
+
     encounter.chief_complaint = payload.chief_complaint
-    encounter.vital_signs = payload.vital_signs.model_dump()
+    encounter.vital_signs = vitals_dict
     encounter.priority = payload.priority
+    if payload.department:
+        encounter.department = payload.department
     if encounter.status == "arrived":
         encounter.status = "triaged"
+
+    if payload.allergies is not None:
+        pat_res = await db.execute(select(Patient).where(Patient.id == encounter.patient_id))
+        pat = pat_res.scalar_one_or_none()
+        if pat:
+            pat.allergies = payload.allergies
 
     await db.commit()
     await db.refresh(encounter)
@@ -521,14 +707,30 @@ async def save_opd_triage(
         resource_type="Encounter",
         resource_id=str(encounter.id),
         user_id=current_user.id,
-        user_name=f"{current_user.full_name} ({current_user.username})",
+        user_name=f"{current_user.full_name} ({current_user.license_number or current_user.username})",
         user_role=",".join(r.name for r in current_user.roles),
         client_ip=request.client.host if request.client else None,
-        module_id="@organella-module/doctor-opd",
+        module_id="@organella-module/reception-triage",
         details={
             "encounter_number": encounter.encounter_number,
             "chief_complaint": encounter.chief_complaint,
             "vital_signs": encounter.vital_signs,
+            "priority": encounter.priority,
+            "allergies_updated": payload.allergies,
+        },
+    )
+
+    await publish_event(
+        channel="organella:clinical_events",
+        event_name="on_triage_completed",
+        payload={
+            "encounter_id": str(encounter.id),
+            "encounter_number": encounter.encounter_number,
+            "queue_number": encounter.queue_number,
+            "patient_id": str(encounter.patient_id),
+            "priority": encounter.priority,
+            "triaged_by": current_user.username,
+            "bmi": vitals_dict.get("bmi"),
         },
     )
     return encounter

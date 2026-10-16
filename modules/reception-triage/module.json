@@ -1,0 +1,23 @@
+{
+  "id": "reception-triage",
+  "name": "Reception, Queue & Nursing Triage",
+  "version": "0.1.0",
+  "author": "Organella Community",
+  "description": "Reception, Queue & Nursing Triage — Micro-Frontend Extension Module for Organella",
+  "permissions": [
+    "patient:read",
+    "queue:manage",
+    "triage:read",
+    "triage:write"
+  ],
+  "frontend": {
+    "entry": "http://localhost:5003/assets/remoteEntry.js",
+    "slots": [
+      {
+        "slotId": "patient-workspace-tab",
+        "title": "Reception, Queue & Nursing Triage",
+        "component": "./WorkspaceTab"
+      }
+    ]
+  }
+}

@@ -52,6 +52,16 @@ const federatedComponentMap: Record<string, React.ComponentType<any>> = {
       return { default: mod.WorkspaceTab };
     }
   ),
+  'reception-triage:./WorkspaceTab': createSafeFederatedComponent(
+    async () => {
+      const mod = await import('@organella-module/reception-triage');
+      return { default: mod.WorkspaceTab };
+    },
+    async () => {
+      const mod = await import('@organella-module/reception-triage');
+      return { default: mod.WorkspaceTab };
+    }
+  ),
 };
 
 export function resolveSlotComponents(

@@ -117,6 +117,25 @@ const fallbackPharmacyManifest: ModuleManifest = {
   },
 };
 
+const fallbackReceptionTriageManifest: ModuleManifest = {
+  id: 'reception-triage',
+  name: 'Reception, Queue & Nursing Triage',
+  version: '0.1.0',
+  author: 'Organella Community',
+  description: 'ระบบเวชระเบียน ออกคิวผู้ป่วยนอก และจุดคัดกรองสัญญาณชีพพยาบาล',
+  permissions: ['patient:read', 'queue:manage', 'triage:read', 'triage:write'],
+  frontend: {
+    entry: 'http://localhost:5003/assets/remoteEntry.js',
+    slots: [
+      {
+        slotId: 'patient-workspace-tab',
+        title: 'เวชระเบียนและคัดกรอง (Reception & Triage)',
+        component: './WorkspaceTab',
+      },
+    ],
+  },
+};
+
 const DEMO_ACCOUNTS = [
   {
     username: 'dr.thanakorn',
@@ -170,8 +189,8 @@ const PORTAL_VIEWS: Array<{
 }> = [
   {
     id: 'clinical',
-    label: '🩺 Clinical Workbench (ห้องตรวจและคลินิก)',
-    requiredRoles: ['patient:read', 'encounter:read'],
+    label: '🩺 Clinical Workbench (ห้องตรวจ คัดกรอง และห้องยา)',
+    requiredRoles: ['patient:read'],
   },
   {
     id: 'admin-master',
@@ -207,6 +226,7 @@ export function App() {
   const [conditions, setConditions] = useState<ClinicalConditionInput[]>(initialConditions);
   const [medications, setMedications] = useState<ClinicalMedicationInput[]>(initialMedications);
   const [activeModules, setActiveModules] = useState<ModuleManifest[]>([
+    fallbackReceptionTriageManifest,
     fallbackDoctorOpdManifest,
     fallbackPharmacyManifest,
   ]);
@@ -253,12 +273,19 @@ export function App() {
       setAuthToken(data.access_token);
       setCurrentUser(mappedUser);
 
-      // Route to appropriate initial portal view based on permission list (not group name)
-      const canViewClinical = checkRequiredPermissions(mappedUser.permissions, [
-        'patient:read',
-        'encounter:read',
-      ]).allowed;
+      // Route to appropriate initial portal view & tab based on permission list (never group name)
+      const perms = mappedUser.permissions || [];
+      const isAdminOnly = perms.includes('admin:users') && !perms.includes('encounter:sign') && !perms.includes('triage:write') && !perms.includes('medication:dispense') && !perms.includes('queue:manage');
+      const canViewClinical = !isAdminOnly && checkRequiredPermissions(perms, ['patient:read']).allowed;
       setPortalView(canViewClinical ? 'clinical' : 'admin-master');
+
+      if (perms.includes('encounter:sign')) {
+        setActiveWorkspaceTab('doctor-opd');
+      } else if (perms.includes('medication:dispense')) {
+        setActiveWorkspaceTab('pharmacy-dispense');
+      } else if (perms.includes('triage:write') || perms.includes('queue:manage')) {
+        setActiveWorkspaceTab('reception-triage');
+      }
     } catch {
       setLoginError('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ยืนยันตัวตน (http://localhost:8000) ได้');
     } finally {
@@ -289,8 +316,14 @@ export function App() {
         if (res.ok) {
           const data: ModuleManifest[] = await res.json();
           if (data && data.length > 0) {
-            const hasPharm = data.some((m) => m.id === 'pharmacy-dispense');
-            setActiveModules(hasPharm ? data : [...data, fallbackPharmacyManifest]);
+            const merged = [...data];
+            if (!merged.some((m) => m.id === 'reception-triage')) {
+              merged.unshift(fallbackReceptionTriageManifest);
+            }
+            if (!merged.some((m) => m.id === 'pharmacy-dispense')) {
+              merged.push(fallbackPharmacyManifest);
+            }
+            setActiveModules(merged);
           }
         }
       } catch {

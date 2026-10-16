@@ -16,6 +16,21 @@ class VitalSignsSchema(BaseModel):
     spo2: Optional[int] = Field(default=98, description="Oxygen Saturation (%)")
     weight: Optional[float] = Field(default=65.0, description="Weight (kg)")
     height: Optional[float] = Field(default=170.0, description="Height (cm)")
+    bmi: Optional[float] = Field(default=None, description="Body Mass Index (kg/m²)")
+    pain_score: Optional[int] = Field(default=0, ge=0, le=10, description="Pain Score (0-10)")
+
+
+class QueueCheckInCreate(BaseModel):
+    patient_id: uuid.UUID
+    department: str = Field(default="อายุรกรรมทั่วไป (OPD Med Rm.3)")
+    priority: str = Field(default="routine")
+    chief_complaint: Optional[str] = Field(default="มาตรวจตามนัด / ซักประวัติที่จุดคัดกรอง")
+
+
+class QueueStatusUpdate(BaseModel):
+    status: str = Field(..., description="arrived, triaged, in-progress, finished, cancelled")
+    priority: Optional[str] = None
+    department: Optional[str] = None
 
 
 class SoapNoteSchema(BaseModel):
