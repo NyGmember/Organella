@@ -218,6 +218,74 @@ def medication_to_fhir_dict(med: DBMedicationOrder) -> Dict[str, Any]:
     }
 
 
+def lab_order_to_fhir_dict(lab: Any) -> Dict[str, Any]:
+    """Converts an internal DB LabOrder into an HL7 FHIR R4 Observation (laboratory) resource dict"""
+    interp_map = {
+        "normal": ("N", "Normal"),
+        "high": ("H", "High"),
+        "low": ("L", "Low"),
+        "critical": ("AA", "Critically Abnormal"),
+        "pending": ("IND", "Indeterminate"),
+    }
+    icode, idisplay = interp_map.get(lab.abnormal_flag, ("N", "Normal"))
+
+    obs: Dict[str, Any] = {
+        "resourceType": "Observation",
+        "id": str(lab.id),
+        "status": "final" if lab.status == "completed" else "registered",
+        "category": [
+            {
+                "coding": [
+                    {
+                        "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                        "code": "laboratory",
+                        "display": "Laboratory",
+                    }
+                ]
+            }
+        ],
+        "code": {
+            "coding": [
+                {
+                    "system": "http://loinc.org",
+                    "code": lab.loinc_code or lab.lab_code,
+                    "display": lab.test_name,
+                }
+            ],
+            "text": f"{lab.lab_code} ({lab.loinc_code}) - {lab.test_name}",
+        },
+        "subject": {"reference": f"Patient/{lab.patient_id}"},
+        "encounter": {"reference": f"Encounter/{lab.encounter_id}"},
+        "interpretation": [
+            {
+                "coding": [
+                    {
+                        "system": "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation",
+                        "code": icode,
+                        "display": idisplay,
+                    }
+                ]
+            }
+        ],
+    }
+
+    if lab.result_value is not None:
+        try:
+            num_val = float(lab.result_value)
+            obs["valueQuantity"] = {
+                "value": num_val,
+                "unit": lab.unit or "",
+                "system": "http://unitsofmeasure.org",
+            }
+        except ValueError:
+            obs["valueString"] = f"{lab.result_value} {lab.unit or ''}".strip()
+
+    if lab.reference_range:
+        obs["referenceRange"] = [{"text": lab.reference_range}]
+
+    return obs
+
+
 def create_encounter_everything_bundle(
     encounter: DBEncounter,
     patient: DBPatient,
@@ -225,7 +293,7 @@ def create_encounter_everything_bundle(
 ) -> Dict[str, Any]:
     """
     Generates an HL7 FHIR R4 Collection Bundle ($everything) for a clinical encounter,
-    packaging Patient, Encounter, Conditions (ICD-10), and MedicationRequests.
+    packaging Patient, Encounter, Conditions (ICD-10), MedicationRequests, and Laboratory Observations.
     """
     fhir_patient = patient_to_fhir(patient).model_dump(mode="json", exclude_none=True)
     fhir_encounter = encounter_to_fhir_dict(encounter, patient)
@@ -254,6 +322,14 @@ def create_encounter_everything_bundle(
             {
                 "fullUrl": f"{base_url}/MedicationRequest/{med.id}",
                 "resource": medication_to_fhir_dict(med),
+            }
+        )
+
+    for lab in getattr(encounter, "lab_orders", []) or []:
+        entries.append(
+            {
+                "fullUrl": f"{base_url}/Observation/{lab.id}",
+                "resource": lab_order_to_fhir_dict(lab),
             }
         )
 

@@ -1,0 +1,23 @@
+{
+  "id": "lab-lis",
+  "name": "Laboratory & Diagnostic Orders (LIS)",
+  "version": "0.1.0",
+  "author": "Organella Community",
+  "description": "Laboratory & Diagnostic Orders (LIS) — Micro-Frontend Extension Module for Organella",
+  "permissions": [
+    "patient:read",
+    "lab:read",
+    "lab:order",
+    "lab:result_write"
+  ],
+  "frontend": {
+    "entry": "http://localhost:5004/assets/remoteEntry.js",
+    "slots": [
+      {
+        "slotId": "patient-workspace-tab",
+        "title": "Laboratory & Diagnostic Orders (LIS)",
+        "component": "./WorkspaceTab"
+      }
+    ]
+  }
+}

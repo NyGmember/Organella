@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from organella_core.database import get_db
 from organella_core.models.audit import AuditLog
 from organella_core.models.auth import User
-from organella_core.models.master_data import MasterICD10, MasterMedication
+from organella_core.models.master_data import MasterICD10, MasterLabTest, MasterMedication
 from organella_core.models.patient import Patient
 from organella_core.schemas.master_data import (
     AuditLogResponse,
@@ -18,6 +18,9 @@ from organella_core.schemas.master_data import (
     ICD10BulkImportRequest,
     ICD10MasterCreate,
     ICD10MasterResponse,
+    LabTestBulkImportRequest,
+    LabTestMasterCreate,
+    LabTestMasterResponse,
     MedicationBulkImportRequest,
     MedicationMasterCreate,
     MedicationMasterResponse,
@@ -468,3 +471,125 @@ async def list_audit_logs(
     stmt = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+# ============================================================================
+# 5. Laboratory Test Catalog (LOINC) Master Data & Bulk Import
+# ============================================================================
+@router.get("/labs", response_model=List[LabTestMasterResponse])
+async def list_master_labs(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    q: Optional[str] = Query(None, description="Search by Lab Code, LOINC, or Test Name"),
+    category: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Query LOINC Laboratory Master Catalog"""
+    stmt = select(MasterLabTest).where(MasterLabTest.is_active.is_(True))
+    if q and q.strip():
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                MasterLabTest.code.ilike(pattern),
+                MasterLabTest.loinc_code.ilike(pattern),
+                MasterLabTest.test_name.ilike(pattern),
+                MasterLabTest.category.ilike(pattern),
+            )
+        )
+    if category:
+        stmt = stmt.where(MasterLabTest.category == category)
+    stmt = stmt.order_by(MasterLabTest.code.asc()).limit(limit)
+    res = await db.execute(stmt)
+    return list(res.scalars().all())
+
+
+@router.post("/labs/import", response_model=BulkImportResult)
+async def bulk_import_labs(
+    payload: LabTestBulkImportRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permissions(["masterdata:labs"]))],
+):
+    """Bulk import Laboratory Test Catalog from JSON or CSV (Requires 'masterdata:labs')"""
+    records: List[LabTestMasterCreate] = list(payload.items or [])
+
+    if payload.csv_text and payload.csv_text.strip():
+        reader = csv.DictReader(io.StringIO(payload.csv_text.strip()))
+        for row in reader:
+            code = (row.get("code") or "").strip()
+            loinc_code = (row.get("loinc_code") or "").strip()
+            test_name = (row.get("test_name") or "").strip()
+            if code and test_name:
+                rlow_str = (row.get("ref_low") or "").strip()
+                rhigh_str = (row.get("ref_high") or "").strip()
+                records.append(
+                    LabTestMasterCreate(
+                        code=code,
+                        loinc_code=loinc_code or "00000-0",
+                        test_name=test_name,
+                        category=(row.get("category") or "Clinical Chemistry").strip(),
+                        specimen_type=(row.get("specimen_type") or "Serum / Plasma").strip(),
+                        unit=(row.get("unit") or "mg/dL").strip(),
+                        reference_range=(row.get("reference_range") or "").strip(),
+                        ref_low=float(rlow_str) if rlow_str else None,
+                        ref_high=float(rhigh_str) if rhigh_str else None,
+                    )
+                )
+
+    if not records:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ไม่พบรายการตรวจแล็บสำหรับนำเข้า (No valid Lab Test records provided)",
+        )
+
+    imported = 0
+    updated = 0
+    for rec in records:
+        code_upper = rec.code.strip().upper()
+        res = await db.execute(select(MasterLabTest).where(MasterLabTest.code == code_upper))
+        existing = res.scalar_one_or_none()
+        if existing:
+            existing.loinc_code = rec.loinc_code
+            existing.test_name = rec.test_name
+            existing.category = rec.category
+            existing.specimen_type = rec.specimen_type
+            existing.unit = rec.unit
+            existing.reference_range = rec.reference_range
+            existing.ref_low = rec.ref_low
+            existing.ref_high = rec.ref_high
+            existing.is_active = rec.is_active
+            updated += 1
+        else:
+            db.add(
+                MasterLabTest(
+                    code=code_upper,
+                    loinc_code=rec.loinc_code,
+                    test_name=rec.test_name,
+                    category=rec.category,
+                    specimen_type=rec.specimen_type,
+                    unit=rec.unit,
+                    reference_range=rec.reference_range,
+                    ref_low=rec.ref_low,
+                    ref_high=rec.ref_high,
+                    is_active=rec.is_active,
+                )
+            )
+            imported += 1
+
+    await db.commit()
+
+    await log_audit_event(
+        db=db,
+        action="BULK_IMPORT_LAB_CATALOG",
+        resource_type="MasterLabTest",
+        user_id=current_user.id,
+        user_name=current_user.username,
+        client_ip=request.client.host if request.client else None,
+        details={"imported": imported, "updated": updated, "total": len(records)},
+    )
+
+    return BulkImportResult(
+        resource_type="MasterLabTest",
+        imported_count=imported,
+        updated_count=updated,
+        total_processed=len(records),
+    )

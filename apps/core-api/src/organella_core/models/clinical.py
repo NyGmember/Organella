@@ -64,6 +64,9 @@ class Encounter(Base, UUIDMixin, TimestampMixin):
     medications: Mapped[List["MedicationOrder"]] = relationship(
         "MedicationOrder", back_populates="encounter", cascade="all, delete-orphan", lazy="selectin"
     )
+    lab_orders: Mapped[List["LabOrder"]] = relationship(
+        "LabOrder", back_populates="encounter", cascade="all, delete-orphan", lazy="selectin"
+    )
 
 
 class Condition(Base, UUIDMixin, TimestampMixin):
@@ -137,3 +140,50 @@ class MedicationOrder(Base, UUIDMixin, TimestampMixin):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     encounter: Mapped["Encounter"] = relationship("Encounter", back_populates="medications")
+
+
+class LabOrder(Base, UUIDMixin, TimestampMixin):
+    """
+    Outpatient Laboratory & Diagnostic Order & Result (LIS)
+    Maps directly to HL7 FHIR R4 Observation (laboratory) and DiagnosticReport resources.
+    """
+
+    __tablename__ = "opd_lab_orders"
+
+    encounter_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("opd_encounters.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    patient_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mpi_patients.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    lab_code: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
+    loinc_code: Mapped[Optional[str]] = mapped_column(String(30), index=True, nullable=True)
+    test_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    category: Mapped[str] = mapped_column(String(100), default="Clinical Chemistry", nullable=False)
+    specimen_type: Mapped[str] = mapped_column(
+        String(100), default="Serum / Plasma", nullable=False
+    )
+    priority: Mapped[str] = mapped_column(
+        String(20), default="routine", nullable=False
+    )  # routine, urgent, stat
+    status: Mapped[str] = mapped_column(
+        String(30), default="ordered", index=True, nullable=False
+    )  # ordered, collected, completed, cancelled
+    result_value: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    unit: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    reference_range: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    abnormal_flag: Mapped[str] = mapped_column(
+        String(30), default="pending", nullable=False
+    )  # pending, normal, high, low, critical
+    ordered_by_username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    reported_by_username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    reported_by_license: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    clinical_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    encounter: Mapped["Encounter"] = relationship("Encounter", back_populates="lab_orders")

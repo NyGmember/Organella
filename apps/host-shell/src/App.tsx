@@ -136,19 +136,38 @@ const fallbackReceptionTriageManifest: ModuleManifest = {
   },
 };
 
+const fallbackLabLisManifest: ModuleManifest = {
+  id: 'lab-lis',
+  name: 'Laboratory & Diagnostic Orders (LIS)',
+  version: '0.1.0',
+  author: 'Organella Community',
+  description: 'ระบบห้องปฏิบัติการทางการแพทย์ สั่งตรวจวิเคราะห์ LOINC และรายงานผลแล็บ',
+  permissions: ['patient:read', 'lab:read', 'lab:order', 'lab:result_write'],
+  frontend: {
+    entry: 'http://localhost:5004/assets/remoteEntry.js',
+    slots: [
+      {
+        slotId: 'patient-workspace-tab',
+        title: 'ห้องปฏิบัติการ (Laboratory LIS)',
+        component: './WorkspaceTab',
+      },
+    ],
+  },
+};
+
 const DEMO_ACCOUNTS = [
   {
     username: 'dr.thanakorn',
     password: 'doctor12345',
     title: '👨‍⚕️ แพทย์ (Doctor)',
-    desc: 'นพ. ธนากร (ว.45892) — สิทธิ์ตรวจรักษา วินิจฉัย ICD-10 และสั่งยา',
+    desc: 'นพ. ธนากร (ว.45892) — สิทธิ์ตรวจรักษา วินิจฉัย ICD-10 สั่งแล็บ และสั่งยา',
     badge: 'bg-teal-50 text-teal-800 border-teal-300',
   },
   {
     username: 'admin',
     password: 'admin12345',
     title: '👨‍💼 ผู้ดูแลระบบ (System Admin)',
-    desc: 'จัดการผู้ใช้/สิทธิ์, นำเข้า ICD-10 & ยา (ไม่มีสิทธิ์สั่งยาหรือบันทึกแทนแพทย์)',
+    desc: 'จัดการผู้ใช้/สิทธิ์, นำเข้า ICD-10, ยา & LOINC (ไม่มีสิทธิ์สั่งยาหรือบันทึกแทนแพทย์)',
     badge: 'bg-indigo-50 text-indigo-800 border-indigo-300',
   },
   {
@@ -157,6 +176,13 @@ const DEMO_ACCOUNTS = [
     title: '👩‍⚕️ พยาบาลคัดกรอง (Triage Nurse)',
     desc: 'พว. สุดาพร — บันทึกอาการแรกรับและวัดสัญญาณชีพ (ล็อกการสั่งยา/วินิจฉัย)',
     badge: 'bg-blue-50 text-blue-800 border-blue-300',
+  },
+  {
+    username: 'lab.somkid',
+    password: 'lab12345',
+    title: '🔬 นักเทคนิคการแพทย์ (Medical Technologist)',
+    desc: 'ทน. สมคิด (ทน.14209) — รับสิ่งส่งตรวจและรายงานผลแล็บ LOINC',
+    badge: 'bg-violet-50 text-violet-800 border-violet-300',
   },
   {
     username: 'pharm.wichai',
@@ -189,7 +215,7 @@ const PORTAL_VIEWS: Array<{
 }> = [
   {
     id: 'clinical',
-    label: '🩺 Clinical Workbench (ห้องตรวจ คัดกรอง และห้องยา)',
+    label: '🩺 Clinical Workbench (ห้องตรวจ คัดกรอง แล็บ และห้องยา)',
     requiredRoles: ['patient:read'],
   },
   {
@@ -228,6 +254,7 @@ export function App() {
   const [activeModules, setActiveModules] = useState<ModuleManifest[]>([
     fallbackReceptionTriageManifest,
     fallbackDoctorOpdManifest,
+    fallbackLabLisManifest,
     fallbackPharmacyManifest,
   ]);
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<string>('doctor-opd');
@@ -275,12 +302,21 @@ export function App() {
 
       // Route to appropriate initial portal view & tab based on permission list (never group name)
       const perms = mappedUser.permissions || [];
-      const isAdminOnly = perms.includes('admin:users') && !perms.includes('encounter:sign') && !perms.includes('triage:write') && !perms.includes('medication:dispense') && !perms.includes('queue:manage');
-      const canViewClinical = !isAdminOnly && checkRequiredPermissions(perms, ['patient:read']).allowed;
+      const isAdminOnly =
+        perms.includes('admin:users') &&
+        !perms.includes('encounter:sign') &&
+        !perms.includes('triage:write') &&
+        !perms.includes('medication:dispense') &&
+        !perms.includes('lab:result_write') &&
+        !perms.includes('queue:manage');
+      const canViewClinical =
+        !isAdminOnly && checkRequiredPermissions(perms, ['patient:read']).allowed;
       setPortalView(canViewClinical ? 'clinical' : 'admin-master');
 
       if (perms.includes('encounter:sign')) {
         setActiveWorkspaceTab('doctor-opd');
+      } else if (perms.includes('lab:result_write')) {
+        setActiveWorkspaceTab('lab-lis');
       } else if (perms.includes('medication:dispense')) {
         setActiveWorkspaceTab('pharmacy-dispense');
       } else if (perms.includes('triage:write') || perms.includes('queue:manage')) {
@@ -319,6 +355,9 @@ export function App() {
             const merged = [...data];
             if (!merged.some((m) => m.id === 'reception-triage')) {
               merged.unshift(fallbackReceptionTriageManifest);
+            }
+            if (!merged.some((m) => m.id === 'lab-lis')) {
+              merged.push(fallbackLabLisManifest);
             }
             if (!merged.some((m) => m.id === 'pharmacy-dispense')) {
               merged.push(fallbackPharmacyManifest);

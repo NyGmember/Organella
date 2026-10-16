@@ -62,6 +62,16 @@ const federatedComponentMap: Record<string, React.ComponentType<any>> = {
       return { default: mod.WorkspaceTab };
     }
   ),
+  'lab-lis:./WorkspaceTab': createSafeFederatedComponent(
+    async () => {
+      const mod = await import('@organella-module/lab-lis');
+      return { default: mod.WorkspaceTab };
+    },
+    async () => {
+      const mod = await import('@organella-module/lab-lis');
+      return { default: mod.WorkspaceTab };
+    }
+  ),
 };
 
 export function resolveSlotComponents(

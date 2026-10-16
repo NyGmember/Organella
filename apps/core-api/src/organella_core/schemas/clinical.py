@@ -81,6 +81,52 @@ class MedicationOrderResponse(MedicationOrderCreate):
     created_at: datetime
 
 
+class LabOrderCreate(BaseModel):
+    lab_code: str = Field(..., min_length=1, max_length=50)
+    loinc_code: Optional[str] = Field(default=None, max_length=30)
+    test_name: str = Field(..., min_length=1, max_length=255)
+    category: str = Field(default="Clinical Chemistry", max_length=100)
+    specimen_type: str = Field(default="Serum / Plasma", max_length=100)
+    priority: str = Field(default="routine")
+    unit: Optional[str] = None
+    reference_range: Optional[str] = None
+    clinical_note: Optional[str] = None
+
+
+class LabResultReportPayload(BaseModel):
+    result_value: str = Field(..., min_length=1, max_length=100)
+    unit: Optional[str] = None
+    reference_range: Optional[str] = None
+    abnormal_flag: Optional[str] = Field(
+        default=None, description="normal, high, low, critical (auto-computed if numeric)"
+    )
+    clinical_note: Optional[str] = None
+
+
+class LabOrderResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    encounter_id: uuid.UUID
+    patient_id: uuid.UUID
+    lab_code: str
+    loinc_code: Optional[str] = None
+    test_name: str
+    category: str
+    specimen_type: str
+    priority: str
+    status: str
+    result_value: Optional[str] = None
+    unit: Optional[str] = None
+    reference_range: Optional[str] = None
+    abnormal_flag: str
+    ordered_by_username: Optional[str] = None
+    reported_by_username: Optional[str] = None
+    reported_by_license: Optional[str] = None
+    clinical_note: Optional[str] = None
+    created_at: datetime
+
+
 class EncounterConsultationCreate(BaseModel):
     encounter_id: Optional[uuid.UUID] = None
     encounter_number: Optional[str] = None
@@ -116,6 +162,7 @@ class EncounterResponse(BaseModel):
     ended_at: Optional[datetime] = None
     conditions: List[ConditionResponse] = Field(default_factory=list)
     medications: List[MedicationOrderResponse] = Field(default_factory=list)
+    lab_orders: List[LabOrderResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -140,6 +187,7 @@ class QueueItemResponse(BaseModel):
     soap_note: Dict[str, Any] = Field(default_factory=dict)
     conditions: List[ConditionResponse] = Field(default_factory=list)
     medications: List[MedicationOrderResponse] = Field(default_factory=list)
+    lab_orders: List[LabOrderResponse] = Field(default_factory=list)
 
 
 class ICD10CodeItem(BaseModel):

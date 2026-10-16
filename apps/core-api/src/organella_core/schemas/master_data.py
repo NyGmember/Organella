@@ -97,3 +97,31 @@ class AuditLogResponse(BaseModel):
     module_id: Optional[str] = None
     details: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class LabTestMasterCreate(BaseModel):
+    code: str = Field(..., min_length=1, max_length=50)
+    loinc_code: str = Field(..., min_length=1, max_length=30)
+    test_name: str = Field(..., min_length=1, max_length=255)
+    category: str = Field(default="Clinical Chemistry", max_length=100)
+    specimen_type: str = Field(default="Serum / Plasma", max_length=100)
+    unit: str = Field(default="mg/dL", max_length=50)
+    reference_range: str = Field(default="", max_length=100)
+    ref_low: Optional[float] = None
+    ref_high: Optional[float] = None
+    is_active: bool = True
+
+
+class LabTestMasterResponse(LabTestMasterCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    created_at: datetime
+
+
+class LabTestBulkImportRequest(BaseModel):
+    items: Optional[List[LabTestMasterCreate]] = None
+    csv_text: Optional[str] = Field(
+        default=None,
+        description="CSV with header: code,loinc_code,test_name,category,specimen_type,unit,reference_range,ref_low,ref_high",
+    )

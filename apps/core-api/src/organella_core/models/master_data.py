@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import Boolean, String, Text
+from sqlalchemy import Boolean, Float, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from organella_core.database import Base
@@ -58,3 +58,27 @@ class MasterMedication(Base, UUIDMixin, TimestampMixin):
         if self.dosage_form:
             parts.append(self.dosage_form.capitalize())
         return " ".join(parts)
+
+
+class MasterLabTest(Base, UUIDMixin, TimestampMixin):
+    """
+    Master Data Table for Laboratory & Diagnostic Test Catalog (LOINC & Local Lab Codes).
+    Supports CRUD management, reference range checking, and bulk CSV/JSON import.
+    """
+
+    __tablename__ = "master_lab_tests"
+
+    code: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    loinc_code: Mapped[str] = mapped_column(String(30), index=True, nullable=False)
+    test_name: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    category: Mapped[str] = mapped_column(
+        String(100), default="Clinical Chemistry", index=True, nullable=False
+    )
+    specimen_type: Mapped[str] = mapped_column(
+        String(100), default="Serum / Plasma", nullable=False
+    )
+    unit: Mapped[str] = mapped_column(String(50), default="mg/dL", nullable=False)
+    reference_range: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    ref_low: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ref_high: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

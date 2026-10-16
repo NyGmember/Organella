@@ -9,8 +9,8 @@ from organella_core.models.auth import (
     user_roles,
 )
 from organella_core.models.base import TimestampMixin, UUIDMixin
-from organella_core.models.clinical import Condition, Encounter, MedicationOrder
-from organella_core.models.master_data import MasterICD10, MasterMedication
+from organella_core.models.clinical import Condition, Encounter, LabOrder, MedicationOrder
+from organella_core.models.master_data import MasterICD10, MasterLabTest, MasterMedication
 from organella_core.models.module import CoreModule
 from organella_core.models.patient import Patient
 
@@ -30,6 +30,8 @@ __all__ = [
     "Encounter",
     "Condition",
     "MedicationOrder",
+    "LabOrder",
     "MasterICD10",
     "MasterMedication",
+    "MasterLabTest",
 ]

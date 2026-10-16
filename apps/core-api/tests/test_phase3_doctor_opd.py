@@ -388,3 +388,116 @@ async def test_phase5_reception_checkin_and_nursing_triage_workflow():
         assert triaged_enc["status"] == "triaged"
         assert triaged_enc["vital_signs"]["bmi"] == 24.9
         assert triaged_enc["vital_signs"]["pain_score"] == 3
+
+
+@pytest.mark.asyncio
+async def test_phase6_laboratory_lis_orders_results_and_fhir_observation():
+    """
+    Phase 6 (ORG-7) Verification:
+    1. LOINC Master Lab Catalog search & Bulk CSV import ('masterdata:labs').
+    2. Triage Nurse lacking 'lab:order' gets 403 with missing_roles=['lab:order'] when ordering a lab test.
+    3. Doctor ('dr.thanakorn') orders LAB-FBS (LOINC 1558-6) -> 201 Created.
+    4. Doctor lacking 'lab:result_write' gets 403 with missing_roles=['lab:result_write'] when reporting result.
+    5. Medical Technologist ('lab.somkid', ทน.14209) reports result '136' mg/dL -> auto-classified 'high' (ref 70-99).
+    6. HL7 FHIR R4 /fhir/r4/Encounter/{enc}/$everything includes the LOINC Observation resource.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.get("/api/v1/modules/doctor-opd/queue")
+
+        # 1. Search LOINC Lab Catalog
+        cat_res = await client.get("/api/v1/modules/doctor-opd/labs/catalog?q=FBS")
+        assert cat_res.status_code == 200
+        assert any(item["loinc_code"] == "1558-6" for item in cat_res.json())
+
+        # Bulk CSV import of a new LOINC Lab Test by Medical Technologist ('lab.somkid')
+        lab_login = await client.post(
+            "/api/v1/auth/login", data={"username": "lab.somkid", "password": "lab12345"}
+        )
+        assert lab_login.status_code == 200
+        lab_headers = {"Authorization": f"Bearer {lab_login.json()['access_token']}"}
+
+        import_lab_res = await client.post(
+            "/api/v1/master-data/labs/import",
+            json={
+                "csv_text": "code,loinc_code,test_name,category,specimen_type,unit,reference_range,ref_low,ref_high\nLAB-TSH,3016-3,Thyroid Stimulating Hormone (TSH),Endocrinology,Serum,mIU/L,0.4 - 4.0 mIU/L,0.4,4.0"
+            },
+            headers=lab_headers,
+        )
+        assert import_lab_res.status_code == 200
+        assert import_lab_res.json()["total_processed"] == 1
+
+        # 2. Nurse tries to order a Lab Test -> 403 missing_roles: ['lab:order']
+        nurse_login = await client.post(
+            "/api/v1/auth/login", data={"username": "nurse.suda", "password": "nurse12345"}
+        )
+        nurse_headers = {"Authorization": f"Bearer {nurse_login.json()['access_token']}"}
+
+        nurse_order_attempt = await client.post(
+            "/api/v1/modules/doctor-opd/encounters/ENC-2026-002/labs",
+            json={
+                "lab_code": "LAB-FBS",
+                "test_name": "Fasting Blood Glucose",
+                "priority": "routine",
+            },
+            headers=nurse_headers,
+        )
+        assert nurse_order_attempt.status_code == 403
+        assert nurse_order_attempt.json()["detail"]["missing_roles"] == ["lab:order"]
+
+        # 3. Doctor orders LAB-FBS on ENC-2026-002 -> 201 Created
+        doc_login = await client.post(
+            "/api/v1/auth/login", data={"username": "dr.thanakorn", "password": "doctor12345"}
+        )
+        doc_headers = {"Authorization": f"Bearer {doc_login.json()['access_token']}"}
+
+        order_res = await client.post(
+            "/api/v1/modules/doctor-opd/encounters/ENC-2026-002/labs",
+            json={
+                "lab_code": "LAB-FBS",
+                "test_name": "Fasting Blood Glucose",
+                "priority": "urgent",
+                "clinical_note": "คัดกรองเบาหวาน",
+            },
+            headers=doc_headers,
+        )
+        assert order_res.status_code == 201
+        created_lab = order_res.json()
+        assert created_lab["loinc_code"] == "1558-6"
+        assert created_lab["status"] == "ordered"
+        lab_order_id = created_lab["id"]
+
+        # 4. Doctor tries to report Lab Result -> 403 missing_roles: ['lab:result_write']
+        doc_report_attempt = await client.post(
+            f"/api/v1/modules/doctor-opd/labs/{lab_order_id}/result",
+            json={"result_value": "136"},
+            headers=doc_headers,
+        )
+        assert doc_report_attempt.status_code == 403
+        assert doc_report_attempt.json()["detail"]["missing_roles"] == ["lab:result_write"]
+
+        # 5. Medical Technologist ('lab.somkid') reports result '136' mg/dL -> 200 OK, abnormal_flag='high'
+        report_res = await client.post(
+            f"/api/v1/modules/doctor-opd/labs/{lab_order_id}/result",
+            json={
+                "result_value": "136",
+                "clinical_note": "ตรวจซ้ำด้วยเครื่อง Cobas ยืนยันค่าสูงกว่าเกณฑ์",
+            },
+            headers=lab_headers,
+        )
+        assert report_res.status_code == 200
+        reported_lab = report_res.json()
+        assert reported_lab["status"] == "completed"
+        assert reported_lab["abnormal_flag"] == "high"
+        assert reported_lab["reported_by_license"] == "ทน.14209"
+
+        # 6. Verify HL7 FHIR R4 $everything Bundle on ENC-2026-002 contains the LOINC Observation
+        fhir_res = await client.get("/fhir/r4/Encounter/ENC-2026-002/$everything")
+        assert fhir_res.status_code == 200
+        bundle = fhir_res.json()
+        obs_entries = [
+            e["resource"] for e in bundle["entry"] if e["resource"]["resourceType"] == "Observation"
+        ]
+        assert len(obs_entries) >= 1
+        fbs_obs = next(o for o in obs_entries if o["code"]["coding"][0]["code"] == "1558-6")
+        assert fbs_obs["valueQuantity"]["value"] == 136.0
+        assert fbs_obs["interpretation"][0]["coding"][0]["code"] == "H"

@@ -5,9 +5,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from organella_core.database import AsyncSessionLocal
+import organella_core.models  # noqa: F401
+from organella_core.database import AsyncSessionLocal, Base
 from organella_core.models.auth import Permission, Role, User
-from organella_core.models.master_data import MasterICD10, MasterMedication
+from organella_core.models.master_data import MasterICD10, MasterLabTest, MasterMedication
 from organella_core.security import get_password_hash
 
 # (permission_name, group_name, description)
@@ -102,6 +103,11 @@ DEFAULT_PERMISSIONS: List[Tuple[str, str, str]] = [
         "5. การจัดการข้อมูลหลัก (Master Data Management)",
         "นำเข้าข้อมูลทะเบียนผู้ป่วยแบบกลุ่ม (Bulk MPI Import)",
     ),
+    (
+        "masterdata:labs",
+        "5. การจัดการข้อมูลหลัก (Master Data Management)",
+        "นำเข้า (CSV/JSON) และจัดการรายการตรวจวิเคราะห์ทางห้องปฏิบัติการ (LOINC Lab Catalog)",
+    ),
     # Group 6: System Administration & Audit
     (
         "admin:users",
@@ -122,6 +128,22 @@ DEFAULT_PERMISSIONS: List[Tuple[str, str, str]] = [
         "audit:read",
         "6. การดูแลระบบและตรวจสอบ (System Admin & Audit)",
         "ตรวจสอบประวัติการใช้งานระบบ (PDPA / HIPAA Audit Logs)",
+    ),
+    # Group 7: Laboratory & Diagnostic Orders (LIS)
+    (
+        "lab:read",
+        "7. ห้องปฏิบัติการชันสูตร (Laboratory / LIS)",
+        "ดูรายการสั่งตรวจแล็บและผลตรวจทางห้องปฏิบัติการ",
+    ),
+    (
+        "lab:order",
+        "7. ห้องปฏิบัติการชันสูตร (Laboratory / LIS)",
+        "สั่งตรวจวิเคราะห์ทางห้องปฏิบัติการ (Lab Order - แพทย์)",
+    ),
+    (
+        "lab:result_write",
+        "7. ห้องปฏิบัติการชันสูตร (Laboratory / LIS)",
+        "รับสิ่งส่งตรวจและบันทึก/รับรองผลตรวจทางห้องปฏิบัติการ (นักเทคนิคการแพทย์ ทน.)",
     ),
 ]
 
@@ -246,9 +268,82 @@ INITIAL_MEDICATIONS_MASTER = [
     ),
 ]
 
+# (code, loinc_code, test_name, category, specimen_type, unit, reference_range, ref_low, ref_high)
+INITIAL_LAB_TESTS_MASTER = [
+    (
+        "LAB-CBC",
+        "58410-2",
+        "Complete Blood Count - WBC (ความสมบูรณ์ของเม็ดเลือดขาว)",
+        "Hematology",
+        "EDTA Whole Blood",
+        "10^3/uL",
+        "4.5 - 11.0 10^3/uL",
+        4.5,
+        11.0,
+    ),
+    (
+        "LAB-FBS",
+        "1558-6",
+        "Fasting Blood Glucose (ระดับน้ำตาลในเลือดหลังอดอาหาร)",
+        "Clinical Chemistry",
+        "NaF Fasting Plasma",
+        "mg/dL",
+        "70 - 99 mg/dL",
+        70.0,
+        99.0,
+    ),
+    (
+        "LAB-HBA1C",
+        "4548-4",
+        "Hemoglobin A1c (ระดับน้ำตาลสะสมในเลือด HbA1c)",
+        "Clinical Chemistry",
+        "EDTA Whole Blood",
+        "%",
+        "4.0 - 5.6 %",
+        4.0,
+        5.6,
+    ),
+    (
+        "LAB-CREAT",
+        "2160-0",
+        "Serum Creatinine (การทำงานของไต)",
+        "Renal Function",
+        "Clotted Blood / Serum",
+        "mg/dL",
+        "0.6 - 1.2 mg/dL",
+        0.6,
+        1.2,
+    ),
+    (
+        "LAB-LDL",
+        "13457-7",
+        "LDL Cholesterol (ไขมันคอเลสเตอรอลชนิดไม่ดี)",
+        "Lipid Profile",
+        "Clotted Blood / Serum",
+        "mg/dL",
+        "0 - 130 mg/dL",
+        0.0,
+        130.0,
+    ),
+    (
+        "LAB-ALT",
+        "1742-6",
+        "Alanine Aminotransferase - ALT / SGPT (เอนไซม์ตับ)",
+        "Liver Function",
+        "Clotted Blood / Serum",
+        "U/L",
+        "7 - 40 U/L",
+        7.0,
+        40.0,
+    ),
+]
+
 
 async def ensure_master_data_and_rbac(db: AsyncSession) -> None:
-    """Seeds or updates grouped permissions, strict hospital roles, sample users, ICD-10, and Formulary."""
+    """Seeds or updates grouped permissions, strict hospital roles, sample users, ICD-10, Formulary, and Lab Catalog."""
+    conn = await db.connection()
+    await conn.run_sync(Base.metadata.create_all)
+
     # 1. Seed Grouped Permissions
     perm_map: Dict[str, Permission] = {}
     for perm_name, grp_name, perm_desc in DEFAULT_PERMISSIONS:
@@ -272,6 +367,7 @@ async def ensure_master_data_and_rbac(db: AsyncSession) -> None:
                 perm_map["masterdata:icd10"],
                 perm_map["masterdata:medications"],
                 perm_map["masterdata:patients"],
+                perm_map["masterdata:labs"],
                 perm_map["admin:users"],
                 perm_map["admin:roles"],
                 perm_map["admin:modules"],
@@ -279,7 +375,7 @@ async def ensure_master_data_and_rbac(db: AsyncSession) -> None:
             ],
         ),
         "Doctor": (
-            "แพทย์ผู้ตรวจรักษา (Licensed Physician - บันทึก SOAP, วินิจฉัย ICD-10 และสั่งยา)",
+            "แพทย์ผู้ตรวจรักษา (Licensed Physician - บันทึก SOAP, วินิจฉัย ICD-10, สั่งแล็บ และสั่งยา)",
             [
                 perm_map["patient:read"],
                 perm_map["patient:write"],
@@ -293,6 +389,8 @@ async def ensure_master_data_and_rbac(db: AsyncSession) -> None:
                 perm_map["condition:write"],
                 perm_map["medication:read"],
                 perm_map["medication:prescribe"],
+                perm_map["lab:read"],
+                perm_map["lab:order"],
             ],
         ),
         "Nurse": (
@@ -306,6 +404,7 @@ async def ensure_master_data_and_rbac(db: AsyncSession) -> None:
                 perm_map["encounter:read"],
                 perm_map["condition:read"],
                 perm_map["medication:read"],
+                perm_map["lab:read"],
             ],
         ),
         "Pharmacist": (
@@ -316,7 +415,18 @@ async def ensure_master_data_and_rbac(db: AsyncSession) -> None:
                 perm_map["condition:read"],
                 perm_map["medication:read"],
                 perm_map["medication:dispense"],
+                perm_map["lab:read"],
                 perm_map["masterdata:medications"],
+            ],
+        ),
+        "LabTech": (
+            "นักเทคนิคการแพทย์ (Medical Technologist - รับสิ่งส่งตรวจและรายงานผลแล็บ LOINC)",
+            [
+                perm_map["patient:read"],
+                perm_map["encounter:read"],
+                perm_map["lab:read"],
+                perm_map["lab:result_write"],
+                perm_map["masterdata:labs"],
             ],
         ),
         "Receptionist": (
@@ -355,7 +465,7 @@ async def ensure_master_data_and_rbac(db: AsyncSession) -> None:
             role.permissions = permissions
         role_map[role_name] = role
 
-    # 3. Seed Users for all 6 Roles
+    # 3. Seed Users for all 7 Roles
     initial_users = [
         (
             "admin",
@@ -396,6 +506,16 @@ async def ensure_master_data_and_rbac(db: AsyncSession) -> None:
             "OPD-Pharmacy (ห้องจ่ายยา)",
             False,
             ["Pharmacist"],
+        ),
+        (
+            "lab.somkid",
+            "lab.somkid@organella.health",
+            "lab12345",
+            "ทน. สมคิด วิเคราะห์ผล",
+            "ทน.14209",
+            "Central Laboratory (LIS)",
+            False,
+            ["LabTech"],
         ),
         (
             "reg.somporn",
@@ -475,6 +595,35 @@ async def ensure_master_data_and_rbac(db: AsyncSession) -> None:
                 )
             )
 
+    # 6. Seed Master Lab Test Catalog (LOINC)
+    for (
+        lcode,
+        loinc,
+        tname,
+        cat,
+        spec,
+        unit,
+        refrange,
+        rlow,
+        rhigh,
+    ) in INITIAL_LAB_TESTS_MASTER:
+        lab_res = await db.execute(select(MasterLabTest).where(MasterLabTest.code == lcode))
+        if not lab_res.scalar_one_or_none():
+            db.add(
+                MasterLabTest(
+                    code=lcode,
+                    loinc_code=loinc,
+                    test_name=tname,
+                    category=cat,
+                    specimen_type=spec,
+                    unit=unit,
+                    reference_range=refrange,
+                    ref_low=rlow,
+                    ref_high=rhigh,
+                    is_active=True,
+                )
+            )
+
     await db.commit()
 
 
@@ -488,7 +637,7 @@ async def seed_database():
         await ensure_sample_opd_queue(db)
         await scan_and_sync_local_modules(db)
         print(
-            "[Organella Seed] Seeded 6 Hospital Roles, 20 Grouped Permissions, Master ICD-10, Drug Formulary, Modules & OPD Queue!"
+            "[Organella Seed] Seeded 7 Hospital Roles, 24 Grouped Permissions, Master ICD-10, Drug Formulary, LOINC Lab Catalog, Modules & OPD Queue!"
         )
 
 

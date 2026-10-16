@@ -10,21 +10,24 @@ from sqlalchemy.orm import selectinload
 
 from organella_core.database import get_db
 from organella_core.models.auth import User
-from organella_core.models.clinical import Condition, Encounter, MedicationOrder
-from organella_core.models.master_data import MasterICD10, MasterMedication
+from organella_core.models.clinical import Condition, Encounter, LabOrder, MedicationOrder
+from organella_core.models.master_data import MasterICD10, MasterLabTest, MasterMedication
 from organella_core.models.patient import Patient
 from organella_core.schemas.clinical import (
     ConditionResponse,
     EncounterConsultationCreate,
     EncounterResponse,
     ICD10CodeItem,
+    LabOrderCreate,
+    LabOrderResponse,
+    LabResultReportPayload,
     MedicationOrderResponse,
     QueueCheckInCreate,
     QueueItemResponse,
     QueueStatusUpdate,
     VitalSignsSchema,
 )
-from organella_core.schemas.master_data import MedicationMasterResponse
+from organella_core.schemas.master_data import LabTestMasterResponse, MedicationMasterResponse
 from organella_core.security import require_permissions
 from organella_core.services.audit import log_audit_event
 from organella_core.services.event_bus import publish_event
@@ -421,7 +424,11 @@ async def get_opd_queue(
     stmt = (
         select(Encounter, Patient)
         .join(Patient, Encounter.patient_id == Patient.id)
-        .options(selectinload(Encounter.conditions), selectinload(Encounter.medications))
+        .options(
+            selectinload(Encounter.conditions),
+            selectinload(Encounter.medications),
+            selectinload(Encounter.lab_orders),
+        )
         .order_by(Encounter.queue_number.asc(), Encounter.started_at.asc())
     )
     if status_filter:
@@ -455,6 +462,7 @@ async def get_opd_queue(
                 soap_note=enc.soap_note or {},
                 conditions=[ConditionResponse.model_validate(c) for c in enc.conditions],
                 medications=[MedicationOrderResponse.model_validate(m) for m in enc.medications],
+                lab_orders=[LabOrderResponse.model_validate(lo) for lo in enc.lab_orders],
             )
         )
 
@@ -468,7 +476,9 @@ async def get_opd_encounter(
 ):
     """Retrieve a specific OPD Encounter by UUID or Encounter Number"""
     stmt = select(Encounter).options(
-        selectinload(Encounter.conditions), selectinload(Encounter.medications)
+        selectinload(Encounter.conditions),
+        selectinload(Encounter.medications),
+        selectinload(Encounter.lab_orders),
     )
     try:
         val_uuid = uuid.UUID(encounter_id)
@@ -996,3 +1006,239 @@ async def dispense_opd_medications(
     )
 
     return encounter
+
+
+# ============================================================================
+# Phase 6: Laboratory & Diagnostic Orders (LIS) Endpoints (@organella-module/lab-lis)
+# ============================================================================
+@router.get("/labs/catalog", response_model=List[LabTestMasterResponse])
+async def search_lab_catalog(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    q: Optional[str] = Query(None, description="Search by Lab Code, LOINC, or Test Name"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Search active LOINC Laboratory Master Catalog for Doctor Lab Order entry"""
+    stmt = select(MasterLabTest).where(MasterLabTest.is_active.is_(True))
+    if q and q.strip():
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                MasterLabTest.code.ilike(pattern),
+                MasterLabTest.loinc_code.ilike(pattern),
+                MasterLabTest.test_name.ilike(pattern),
+                MasterLabTest.category.ilike(pattern),
+            )
+        )
+    stmt = stmt.order_by(MasterLabTest.code.asc()).limit(limit)
+    res = await db.execute(stmt)
+    return list(res.scalars().all())
+
+
+@router.get("/encounters/{encounter_number}/labs", response_model=List[LabOrderResponse])
+async def list_encounter_lab_orders(
+    encounter_number: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _current_user: Annotated[User, Depends(require_permissions(["patient:read", "lab:read"]))],
+):
+    """Retrieve all Laboratory Orders & Results for a specific OPD Encounter"""
+    enc_res = await db.execute(
+        select(Encounter)
+        .options(selectinload(Encounter.lab_orders))
+        .where(Encounter.encounter_number == encounter_number)
+    )
+    encounter = enc_res.scalar_one_or_none()
+    if not encounter:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"OPD Encounter '{encounter_number}' not found",
+        )
+    return list(encounter.lab_orders)
+
+
+@router.post(
+    "/encounters/{encounter_number}/labs",
+    response_model=LabOrderResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_encounter_lab_order(
+    encounter_number: str,
+    payload: LabOrderCreate,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[
+        User,
+        Depends(require_permissions(["patient:read", "lab:read", "lab:order"])),
+    ],
+):
+    """
+    Doctor Lab Order Entry Endpoint:
+    Requires ALL of ['patient:read', 'lab:read', 'lab:order'].
+    Enriches LOINC, unit, and reference_range from MasterLabTest if available.
+    """
+    enc_res = await db.execute(
+        select(Encounter).where(Encounter.encounter_number == encounter_number)
+    )
+    encounter = enc_res.scalar_one_or_none()
+    if not encounter:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"OPD Encounter '{encounter_number}' not found",
+        )
+
+    master_res = await db.execute(
+        select(MasterLabTest).where(MasterLabTest.code == payload.lab_code.strip().upper())
+    )
+    master_lab = master_res.scalar_one_or_none()
+
+    lab_order = LabOrder(
+        encounter_id=encounter.id,
+        patient_id=encounter.patient_id,
+        lab_code=payload.lab_code.strip().upper(),
+        loinc_code=payload.loinc_code or (master_lab.loinc_code if master_lab else "00000-0"),
+        test_name=payload.test_name or (master_lab.test_name if master_lab else payload.lab_code),
+        category=payload.category or (master_lab.category if master_lab else "Clinical Chemistry"),
+        specimen_type=payload.specimen_type
+        or (master_lab.specimen_type if master_lab else "Serum / Plasma"),
+        priority=payload.priority,
+        status="ordered",
+        unit=payload.unit or (master_lab.unit if master_lab else ""),
+        reference_range=payload.reference_range
+        or (master_lab.reference_range if master_lab else ""),
+        abnormal_flag="pending",
+        ordered_by_username=current_user.username,
+        clinical_note=payload.clinical_note,
+    )
+    db.add(lab_order)
+    await db.commit()
+    await db.refresh(lab_order)
+
+    await log_audit_event(
+        db=db,
+        action="ORDER_OPD_LAB_TEST",
+        resource_type="LabOrder",
+        resource_id=str(lab_order.id),
+        user_id=current_user.id,
+        user_name=f"{current_user.full_name} ({current_user.license_number or current_user.username})",
+        user_role=",".join(r.name for r in current_user.roles),
+        client_ip=request.client.host if request.client else None,
+        module_id="@organella-module/lab-lis",
+        details={
+            "encounter_number": encounter.encounter_number,
+            "lab_code": lab_order.lab_code,
+            "loinc_code": lab_order.loinc_code,
+            "test_name": lab_order.test_name,
+            "priority": lab_order.priority,
+        },
+    )
+
+    await publish_event(
+        channel="organella:clinical_events",
+        event_name="on_lab_ordered",
+        payload={
+            "lab_order_id": str(lab_order.id),
+            "encounter_number": encounter.encounter_number,
+            "lab_code": lab_order.lab_code,
+            "test_name": lab_order.test_name,
+            "ordered_by": current_user.username,
+        },
+    )
+    return lab_order
+
+
+@router.post("/labs/{lab_order_id}/result", response_model=LabOrderResponse)
+async def report_lab_order_result(
+    lab_order_id: uuid.UUID,
+    payload: LabResultReportPayload,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[
+        User,
+        Depends(require_permissions(["patient:read", "lab:read", "lab:result_write"])),
+    ],
+):
+    """
+    LIS Medical Technologist Result Reporting Endpoint:
+    Requires ALL of ['patient:read', 'lab:read', 'lab:result_write'].
+    Automatically evaluates numeric result_value against MasterLabTest.ref_low / ref_high
+    to classify 'normal', 'low', 'high', or 'critical'.
+    """
+    res = await db.execute(select(LabOrder).where(LabOrder.id == lab_order_id))
+    lab_order = res.scalar_one_or_none()
+    if not lab_order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"LabOrder '{lab_order_id}' not found",
+        )
+
+    master_res = await db.execute(
+        select(MasterLabTest).where(MasterLabTest.code == lab_order.lab_code)
+    )
+    master_lab = master_res.scalar_one_or_none()
+
+    computed_flag = payload.abnormal_flag or "normal"
+    if not payload.abnormal_flag and master_lab:
+        try:
+            val_num = float(payload.result_value.strip())
+            rlow = master_lab.ref_low
+            rhigh = master_lab.ref_high
+            if rhigh is not None and val_num > rhigh * 1.8:
+                computed_flag = "critical"
+            elif rlow is not None and val_num < rlow * 0.6:
+                computed_flag = "critical"
+            elif rhigh is not None and val_num > rhigh:
+                computed_flag = "high"
+            elif rlow is not None and val_num < rlow:
+                computed_flag = "low"
+            else:
+                computed_flag = "normal"
+        except ValueError:
+            computed_flag = "normal"
+
+    lab_order.result_value = payload.result_value.strip()
+    if payload.unit:
+        lab_order.unit = payload.unit
+    if payload.reference_range:
+        lab_order.reference_range = payload.reference_range
+    lab_order.abnormal_flag = computed_flag
+    lab_order.status = "completed"
+    lab_order.reported_by_username = current_user.username
+    lab_order.reported_by_license = current_user.license_number
+    if payload.clinical_note is not None:
+        lab_order.clinical_note = payload.clinical_note
+
+    await db.commit()
+    await db.refresh(lab_order)
+
+    await log_audit_event(
+        db=db,
+        action="REPORT_LAB_RESULT",
+        resource_type="LabOrder",
+        resource_id=str(lab_order.id),
+        user_id=current_user.id,
+        user_name=f"{current_user.full_name} ({current_user.license_number or current_user.username})",
+        user_role=",".join(r.name for r in current_user.roles),
+        client_ip=request.client.host if request.client else None,
+        module_id="@organella-module/lab-lis",
+        details={
+            "lab_code": lab_order.lab_code,
+            "loinc_code": lab_order.loinc_code,
+            "result_value": lab_order.result_value,
+            "unit": lab_order.unit,
+            "abnormal_flag": lab_order.abnormal_flag,
+            "reported_by_license": lab_order.reported_by_license,
+        },
+    )
+
+    await publish_event(
+        channel="organella:clinical_events",
+        event_name="on_lab_result_reported",
+        payload={
+            "lab_order_id": str(lab_order.id),
+            "lab_code": lab_order.lab_code,
+            "result_value": lab_order.result_value,
+            "unit": lab_order.unit,
+            "abnormal_flag": lab_order.abnormal_flag,
+            "reported_by": current_user.username,
+        },
+    )
+    return lab_order

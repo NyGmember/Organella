@@ -142,7 +142,9 @@ async def get_fhir_encounter_everything(
     ICD-10 Conditions, and MedicationRequests.
     """
     stmt = select(Encounter).options(
-        selectinload(Encounter.conditions), selectinload(Encounter.medications)
+        selectinload(Encounter.conditions),
+        selectinload(Encounter.medications),
+        selectinload(Encounter.lab_orders),
     )
     try:
         val_uuid = uuid.UUID(encounter_id)
