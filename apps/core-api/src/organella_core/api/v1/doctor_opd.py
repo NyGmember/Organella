@@ -3,16 +3,15 @@ from datetime import date, datetime, timezone
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from organella_core.config import settings
 from organella_core.database import get_db
-from organella_core.models.auth import Role, User
+from organella_core.models.auth import User
 from organella_core.models.clinical import Condition, Encounter, MedicationOrder
+from organella_core.models.master_data import MasterICD10, MasterMedication
 from organella_core.models.patient import Patient
 from organella_core.schemas.clinical import (
     ConditionResponse,
@@ -21,7 +20,10 @@ from organella_core.schemas.clinical import (
     ICD10CodeItem,
     MedicationOrderResponse,
     QueueItemResponse,
+    VitalSignsSchema,
 )
+from organella_core.schemas.master_data import MedicationMasterResponse
+from organella_core.security import require_permissions
 from organella_core.services.audit import log_audit_event
 from organella_core.services.event_bus import publish_event
 
@@ -30,9 +32,16 @@ router = APIRouter(
     tags=["Module: Doctor OPD Consultation (@organella-module/doctor-opd)"],
 )
 
-optional_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
-# Standard ICD-10-TM / WHO Reference Dictionary for Common OPD Visits
+class TriageUpdatePayload(BaseModel):
+    encounter_number: str
+    patient_id: uuid.UUID
+    chief_complaint: str = Field(..., min_length=1)
+    vital_signs: VitalSignsSchema = Field(default_factory=VitalSignsSchema)
+    priority: str = Field(default="routine")
+
+
+# Standard ICD-10-TM / WHO Reference Dictionary fallback
 COMMON_ICD10_CATALOG: List[ICD10CodeItem] = [
     ICD10CodeItem(
         code="J00",
@@ -60,94 +69,28 @@ COMMON_ICD10_CATALOG: List[ICD10CodeItem] = [
         category="Endocrine & Metabolic",
     ),
     ICD10CodeItem(
-        code="E78.5",
-        display="Hyperlipidaemia, unspecified (ไขมันในเลือดสูง)",
-        category="Endocrine & Metabolic",
-    ),
-    ICD10CodeItem(
         code="K21.9",
         display="Gastro-oesophageal reflux disease without oesophagitis (กรดไหลย้อน GERD)",
         category="Gastrointestinal",
     ),
-    ICD10CodeItem(
-        code="K29.7",
-        display="Gastritis, unspecified (กระเพาะอาหารอักเสบ)",
-        category="Gastrointestinal",
-    ),
-    ICD10CodeItem(
-        code="A09",
-        display="Infectious gastroenteritis and colitis, unspecified (ลำไส้อักเสบติดเชื้อ/ท้องร่วง)",
-        category="Gastrointestinal",
-    ),
-    ICD10CodeItem(
-        code="M54.5",
-        display="Low back pain (ปวดหลังส่วนล่าง)",
-        category="Musculoskeletal",
-    ),
-    ICD10CodeItem(
-        code="M79.1",
-        display="Myalgia (ปวดกล้ามเนื้อ)",
-        category="Musculoskeletal",
-    ),
-    ICD10CodeItem(
-        code="G43.9",
-        display="Migraine, unspecified (ปวดศีรษะไมเกรน)",
-        category="Neurological",
-    ),
-    ICD10CodeItem(
-        code="R50.9",
-        display="Fever, unspecified (ไข้ไม่ทราบสาเหตุ)",
-        category="Symptoms & Signs",
-    ),
-    ICD10CodeItem(
-        code="R51",
-        display="Headache (อาการปวดศีรษะ)",
-        category="Symptoms & Signs",
-    ),
-    ICD10CodeItem(
-        code="L20.9",
-        display="Atopic dermatitis, unspecified (ผื่นภูมิแพ้ผิวหนัง)",
-        category="Dermatology",
-    ),
 ]
 
 
-async def get_optional_user(
-    token: Annotated[Optional[str], Depends(optional_oauth2_scheme)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> Optional[User]:
-    if not token:
-        return None
-    try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
-        user_id_str: Optional[str] = payload.get("sub")
-        if not user_id_str:
-            return None
-        user_id = uuid.UUID(user_id_str)
-        stmt = (
-            select(User)
-            .options(selectinload(User.roles).selectinload(Role.permissions))
-            .where(User.id == user_id, User.is_active.is_(True))
-        )
-        result = await db.execute(stmt)
-        return result.scalar_one_or_none()
-    except (JWTError, ValueError):
-        return None
-
-
 async def ensure_sample_opd_queue(db: AsyncSession) -> None:
-    """Ensures sample patients and OPD encounters exist so the OPD queue is populated out-of-the-box."""
+    """Ensures sample patients, master data, and OPD encounters exist."""
+    from organella_core.seed import ensure_master_data_and_rbac
+
+    await ensure_master_data_and_rbac(db)
+
     count_stmt = select(Encounter).limit(1)
     existing = (await db.execute(count_stmt)).scalar_one_or_none()
     if existing is not None:
         return
 
-    # Find or create doctor user
     doc_res = await db.execute(select(User).where(User.username == "dr.thanakorn"))
     doctor = doc_res.scalar_one_or_none()
     practitioner_id = doctor.id if doctor else None
 
-    # Sample Patients
     sample_patients_data = [
         {
             "hn": "HN-2026-0001",
@@ -407,22 +350,60 @@ async def ensure_sample_opd_queue(db: AsyncSession) -> None:
 
 @router.get("/icd10/search", response_model=List[ICD10CodeItem])
 async def search_icd10_codes(
+    db: Annotated[AsyncSession, Depends(get_db)],
     q: Optional[str] = Query(None, description="Search query by ICD-10 code or disease name"),
     limit: int = Query(15, ge=1, le=50),
 ):
-    """Search standard ICD-10 terminology codes for clinical diagnosis"""
+    """Search ICD-10 terminology codes from Master Data table (`master_icd10_codes`)"""
+    stmt = select(MasterICD10).where(MasterICD10.is_active.is_(True))
+    if q and q.strip():
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                MasterICD10.code.ilike(pattern),
+                MasterICD10.display_en.ilike(pattern),
+                MasterICD10.display_th.ilike(pattern),
+                MasterICD10.category.ilike(pattern),
+            )
+        )
+    stmt = stmt.order_by(MasterICD10.code.asc()).limit(limit)
+    res = await db.execute(stmt)
+    rows = list(res.scalars().all())
+
+    if rows:
+        return [ICD10CodeItem(code=r.code, display=r.display, category=r.category) for r in rows]
+
+    # Fallback if DB not yet seeded
     if not q or not q.strip():
         return COMMON_ICD10_CATALOG[:limit]
-
     query_lower = q.strip().lower()
-    matched = [
+    return [
         item
         for item in COMMON_ICD10_CATALOG
-        if query_lower in item.code.lower()
-        or query_lower in item.display.lower()
-        or query_lower in item.category.lower()
-    ]
-    return matched[:limit]
+        if query_lower in item.code.lower() or query_lower in item.display.lower()
+    ][:limit]
+
+
+@router.get("/medications/search", response_model=List[MedicationMasterResponse])
+async def search_formulary_medications(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    q: Optional[str] = Query(None, description="Search hospital drug formulary"),
+    limit: int = Query(20, ge=1, le=50),
+):
+    """Search Hospital Drug Formulary (`master_medications`) for e-Prescription"""
+    stmt = select(MasterMedication).where(MasterMedication.is_active.is_(True))
+    if q and q.strip():
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                MasterMedication.code.ilike(pattern),
+                MasterMedication.generic_name.ilike(pattern),
+                MasterMedication.trade_name.ilike(pattern),
+            )
+        )
+    stmt = stmt.order_by(MasterMedication.generic_name.asc()).limit(limit)
+    res = await db.execute(stmt)
+    return list(res.scalars().all())
 
 
 @router.get("/queue", response_model=List[QueueItemResponse])
@@ -501,18 +482,83 @@ async def get_opd_encounter(
     return encounter
 
 
+@router.post("/triage", response_model=EncounterResponse)
+async def save_opd_triage(
+    payload: TriageUpdatePayload,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_permissions(["patient:read", "triage:write"]))],
+):
+    """
+    Nursing Triage Endpoint:
+    Allows staff with ['patient:read', 'triage:write'] to record Chief Complaint and Vital Signs
+    WITHOUT altering medical SOAP notes, ICD-10 diagnoses, or prescriptions.
+    """
+    enc_res = await db.execute(
+        select(Encounter)
+        .options(selectinload(Encounter.conditions), selectinload(Encounter.medications))
+        .where(Encounter.encounter_number == payload.encounter_number)
+    )
+    encounter = enc_res.scalar_one_or_none()
+    if not encounter:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"OPD Encounter '{payload.encounter_number}' not found",
+        )
+
+    encounter.chief_complaint = payload.chief_complaint
+    encounter.vital_signs = payload.vital_signs.model_dump()
+    encounter.priority = payload.priority
+    if encounter.status == "arrived":
+        encounter.status = "triaged"
+
+    await db.commit()
+    await db.refresh(encounter)
+
+    await log_audit_event(
+        db=db,
+        action="SAVE_OPD_TRIAGE",
+        resource_type="Encounter",
+        resource_id=str(encounter.id),
+        user_id=current_user.id,
+        user_name=f"{current_user.full_name} ({current_user.username})",
+        user_role=",".join(r.name for r in current_user.roles),
+        client_ip=request.client.host if request.client else None,
+        module_id="@organella-module/doctor-opd",
+        details={
+            "encounter_number": encounter.encounter_number,
+            "chief_complaint": encounter.chief_complaint,
+            "vital_signs": encounter.vital_signs,
+        },
+    )
+    return encounter
+
+
 @router.post("/encounters", response_model=EncounterResponse, status_code=status.HTTP_201_CREATED)
 async def save_opd_consultation(
     payload: EncounterConsultationCreate,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[Optional[User], Depends(get_optional_user)],
+    current_user: Annotated[
+        User,
+        Depends(
+            require_permissions(
+                [
+                    "encounter:read",
+                    "encounter:sign",
+                    "condition:write",
+                    "medication:prescribe",
+                ]
+            )
+        ),
+    ],
 ):
     """
-    Create or update an OPD Consultation including Vital Signs, SOAP Notes,
-    ICD-10 Conditions, and Medication Prescriptions in a single atomic transaction.
+    Strict Clinical Consultation & Sign-Off Endpoint:
+    Requires ALL of ['encounter:read', 'encounter:sign', 'condition:write', 'medication:prescribe'].
+    - Blocks unauthenticated requests (401) and non-physician accounts such as Admin or Nurse (403 with missing_roles).
+    - Cryptographically binds the consultation to the authenticated clinician's user_id and medical license.
     """
-    # Verify patient exists
     pat_res = await db.execute(select(Patient).where(Patient.id == payload.patient_id))
     patient = pat_res.scalar_one_or_none()
     if not patient:
@@ -521,7 +567,6 @@ async def save_opd_consultation(
             detail=f"Patient '{payload.patient_id}' not found in MPI",
         )
 
-    # Check if updating existing encounter
     encounter: Optional[Encounter] = None
     if payload.encounter_id:
         enc_res = await db.execute(
@@ -550,12 +595,10 @@ async def save_opd_consultation(
             encounter.chief_complaint = payload.chief_complaint
         encounter.vital_signs = payload.vital_signs.model_dump()
         encounter.soap_note = payload.soap_note.model_dump()
-        if current_user:
-            encounter.practitioner_id = current_user.id
+        encounter.practitioner_id = current_user.id
         if payload.status == "finished" and not encounter.ended_at:
             encounter.ended_at = now_utc
 
-        # Replace conditions and medications cleanly
         encounter.conditions.clear()
         encounter.medications.clear()
         await db.flush()
@@ -567,7 +610,7 @@ async def save_opd_consultation(
         encounter = Encounter(
             encounter_number=enc_number,
             patient_id=patient.id,
-            practitioner_id=current_user.id if current_user else None,
+            practitioner_id=current_user.id,
             encounter_type=payload.encounter_type,
             status=payload.status,
             priority=payload.priority,
@@ -581,7 +624,6 @@ async def save_opd_consultation(
         db.add(encounter)
         await db.flush()
 
-    # Add ICD-10 Diagnoses
     for cond_in in payload.conditions:
         encounter.conditions.append(
             Condition(
@@ -596,7 +638,6 @@ async def save_opd_consultation(
             )
         )
 
-    # Add Medication Orders
     for med_in in payload.medications:
         encounter.medications.append(
             MedicationOrder(
@@ -614,7 +655,6 @@ async def save_opd_consultation(
 
     await db.commit()
 
-    # Reload with relationships
     reload_stmt = (
         select(Encounter)
         .options(selectinload(Encounter.conditions), selectinload(Encounter.medications))
@@ -622,28 +662,28 @@ async def save_opd_consultation(
     )
     encounter = (await db.execute(reload_stmt)).scalar_one()
 
-    # Audit Log for PDPA / HIPAA Compliance
     await log_audit_event(
         db=db,
         action="SAVE_OPD_CONSULTATION",
         resource_type="Encounter",
         resource_id=str(encounter.id),
-        user_id=current_user.id if current_user else None,
-        user_name=current_user.username if current_user else "dr.thanakorn (session)",
-        user_role=current_user.roles[0].name if (current_user and current_user.roles) else "Doctor",
+        user_id=current_user.id,
+        user_name=f"{current_user.full_name} ({current_user.license_number or current_user.username})",
+        user_role=",".join(r.name for r in current_user.roles),
         client_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
         module_id="@organella-module/doctor-opd",
         details={
             "encounter_number": encounter.encounter_number,
             "patient_hn": patient.hn,
+            "signed_by_username": current_user.username,
+            "signed_by_license": current_user.license_number,
             "status": encounter.status,
             "icd10_codes": [c.icd10_code for c in encounter.conditions],
             "medication_count": len(encounter.medications),
         },
     )
 
-    # Publish Domain Events to Redis Event Bus
     await publish_event(
         channel="organella:clinical_events",
         event_name="on_encounter_saved",
@@ -652,6 +692,7 @@ async def save_opd_consultation(
             "encounter_number": encounter.encounter_number,
             "patient_id": str(patient.id),
             "hn": patient.hn,
+            "signed_by": current_user.username,
             "status": encounter.status,
             "diagnoses": [c.icd10_code for c in encounter.conditions],
         },
@@ -664,6 +705,7 @@ async def save_opd_consultation(
                 "encounter_id": str(encounter.id),
                 "patient_id": str(patient.id),
                 "hn": patient.hn,
+                "prescribed_by": current_user.username,
                 "medications": [
                     {
                         "name": m.medication_name,

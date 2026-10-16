@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, Dict, Optional
+from typing import Annotated, Any, Dict, List, Optional, Sequence, Union
 
 import bcrypt
 from fastapi import Depends, HTTPException, status
@@ -53,12 +53,12 @@ async def get_current_user(
 ) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail="กรุณาเข้าสู่ระบบก่อนใช้งาน (Could not validate credentials)",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
-        user_id_str: str = payload.get("sub")
+        user_id_str: Optional[str] = payload.get("sub")
         if user_id_str is None:
             raise credentials_exception
         user_id = uuid.UUID(user_id_str)
@@ -68,7 +68,10 @@ async def get_current_user(
     result = await db.execute(
         select(User)
         .where(User.id == user_id, User.is_active.is_(True))
-        .options(selectinload(User.roles).selectinload(Role.permissions))
+        .options(
+            selectinload(User.roles).selectinload(Role.permissions),
+            selectinload(User.direct_permissions),
+        )
     )
     user = result.scalar_one_or_none()
     if user is None:
@@ -76,29 +79,40 @@ async def get_current_user(
     return user
 
 
-def require_permission(required_permission: str):
+def require_permissions(required: Union[str, Sequence[str]]):
     """
-    Dependency factory that checks if the authenticated user has the required permission scope.
-    Superusers automatically bypass this check.
+    Dependency factory that verifies the authenticated user possesses ALL required
+    granular permissions/roles in the required list.
+    - NEVER checks by Group name (e.g., never checks 'Admin' or 'Doctor' group title).
+    - NEVER bypasses clinical permissions via is_superuser.
+    - Explicitly reports all missing permissions in the 403 error response.
     """
+    if isinstance(required, str):
+        required_list: List[str] = [required]
+    else:
+        required_list = list(required)
 
     async def permission_checker(
         current_user: Annotated[User, Depends(get_current_user)],
     ) -> User:
-        if current_user.is_superuser:
-            return current_user
+        user_permissions = current_user.get_effective_permissions()
+        missing = [perm for perm in required_list if perm not in user_permissions]
 
-        # Extract all permissions from user's roles
-        user_permissions = set()
-        for role in current_user.roles:
-            for perm in role.permissions:
-                user_permissions.add(perm.name)
-
-        if required_permission not in user_permissions:
+        if missing:
+            missing_str = ", ".join(missing)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Access denied: missing required permission '{required_permission}'",
+                detail={
+                    "message": f"ปฏิเสธการเข้าถึง (Access Denied): ขาดสิทธิ์ที่จำเป็น [{missing_str}]",
+                    "required_roles": required_list,
+                    "missing_roles": missing,
+                    "user_roles": sorted(user_permissions),
+                },
             )
         return current_user
 
     return permission_checker
+
+
+# Alias for backward compatibility
+require_permission = require_permissions

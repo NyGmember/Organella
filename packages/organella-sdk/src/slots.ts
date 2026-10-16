@@ -1,4 +1,5 @@
 import React from 'react';
+import { OrganellaUser } from './context';
 import { PatientDemographics, EncounterSummary } from './patient';
 
 export interface BaseSlotProps {
@@ -8,6 +9,7 @@ export interface BaseSlotProps {
 export interface PatientTabProps extends BaseSlotProps {
   patient: PatientDemographics;
   activeEncounter?: EncounterSummary;
+  user?: OrganellaUser;
   readonly?: boolean;
 }
 

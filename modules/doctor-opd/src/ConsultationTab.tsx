@@ -1,5 +1,9 @@
 import React, { useContext, useEffect, useMemo, useState } from 'react';
-import { OrganellaContext, PatientTabProps } from '@organella/sdk';
+import {
+  checkRequiredPermissions,
+  OrganellaContext,
+  PatientTabProps,
+} from '@organella/sdk';
 
 interface VitalSignsState {
   bp_systolic: number;
@@ -46,12 +50,9 @@ const DEFAULT_ICD10_OPTIONS: ICD10CatalogEntry[] = [
   { code: 'I10', display: 'Essential (primary) hypertension (ความดันโลหิตสูง)', category: 'Cardiovascular' },
   { code: 'E11.9', display: 'Type 2 diabetes mellitus without complications (เบาหวานชนิดที่ 2)', category: 'Endocrine' },
   { code: 'K21.9', display: 'Gastro-oesophageal reflux disease (กรดไหลย้อน GERD)', category: 'Gastrointestinal' },
-  { code: 'K29.7', display: 'Gastritis, unspecified (กระเพาะอาหารอักเสบ)', category: 'Gastrointestinal' },
-  { code: 'M54.5', display: 'Low back pain (ปวดหลังส่วนล่าง)', category: 'Musculoskeletal' },
-  { code: 'R50.9', display: 'Fever, unspecified (ไข้ไม่ทราบสาเหตุ)', category: 'Symptoms' },
 ];
 
-const QUICK_MEDICATIONS: MedicationItem[] = [
+const DEFAULT_QUICK_MEDICATIONS: MedicationItem[] = [
   {
     medication_code: 'RX-PARA-500',
     medication_name: 'Paracetamol 500 mg Tablet',
@@ -82,12 +83,42 @@ const QUICK_MEDICATIONS: MedicationItem[] = [
   },
 ];
 
+// Required role lists for each clinical action (Never checked by group name)
+export const REQUIRED_ROLES_VIEW_OPD = ['patient:read', 'encounter:read'];
+export const REQUIRED_ROLES_TRIAGE = ['patient:read', 'triage:write'];
+export const REQUIRED_ROLES_DOCTOR_SIGN = [
+  'encounter:read',
+  'encounter:sign',
+  'condition:write',
+  'medication:prescribe',
+];
+
 export const ConsultationTab: React.FC<PatientTabProps> = ({
   patient,
   activeEncounter,
+  user,
   readonly,
 }) => {
   const ctx = useContext(OrganellaContext);
+  const effectiveUser = user || ctx?.user;
+  const authToken = ctx?.authToken;
+
+  // Permission-list checks (No group-name check!)
+  const viewCheck = useMemo(
+    () => checkRequiredPermissions(effectiveUser?.permissions, REQUIRED_ROLES_VIEW_OPD),
+    [effectiveUser?.permissions]
+  );
+  const triageCheck = useMemo(
+    () => checkRequiredPermissions(effectiveUser?.permissions, REQUIRED_ROLES_TRIAGE),
+    [effectiveUser?.permissions]
+  );
+  const doctorSignCheck = useMemo(
+    () => checkRequiredPermissions(effectiveUser?.permissions, REQUIRED_ROLES_DOCTOR_SIGN),
+    [effectiveUser?.permissions]
+  );
+
+  const canEditTriage = !readonly && triageCheck.allowed;
+  const canEditClinicalAndSign = !readonly && doctorSignCheck.allowed;
 
   const [chiefComplaint, setChiefComplaint] = useState<string>(
     'ไข้สูง เจ็บคอมาก กลืนลำบาก 2 วันก่อนมาโรงพยาบาล'
@@ -143,6 +174,8 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
     },
   ]);
 
+  const [formularyMeds, setFormularyMeds] = useState<MedicationItem[]>(DEFAULT_QUICK_MEDICATIONS);
+
   // ICD-10 Search state
   const [icdSearchQuery, setIcdSearchQuery] = useState<string>('');
   const [icdResults, setIcdResults] = useState<ICD10CatalogEntry[]>(DEFAULT_ICD10_OPTIONS);
@@ -157,8 +190,9 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
   // Submission status
   const [saving, setSaving] = useState<boolean>(false);
   const [saveBanner, setSaveBanner] = useState<{
-    type: 'success' | 'info';
+    type: 'success' | 'error' | 'info';
     message: string;
+    missingRoles?: string[];
     encounterNumber?: string;
   } | null>(null);
 
@@ -182,7 +216,33 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
     setSaveBanner(null);
   }, [activeEncounter?.id, patient.id]);
 
-  // Search ICD-10 API
+  // Load hospital drug formulary from Master Data API
+  useEffect(() => {
+    async function loadFormulary() {
+      try {
+        const res = await fetch('http://localhost:8000/api/v1/modules/doctor-opd/medications/search');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            setFormularyMeds(
+              data.map((d: any) => ({
+                medication_code: d.code,
+                medication_name: d.display_name || `${d.generic_name} ${d.strength || ''}`.trim(),
+                dosage_instruction: d.default_dosage,
+                quantity: 14,
+                unit: d.unit || 'tablet',
+              }))
+            );
+          }
+        }
+      } catch {
+        // Use fallback formulary
+      }
+    }
+    loadFormulary();
+  }, []);
+
+  // Search ICD-10 Master Data API
   useEffect(() => {
     let active = true;
     const timer = setTimeout(async () => {
@@ -221,6 +281,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
   }, [vitals.weight, vitals.height]);
 
   const handleAddCondition = (entry: ICD10CatalogEntry) => {
+    if (!canEditClinicalAndSign) return;
     if (conditions.some((c) => c.icd10_code === entry.code)) return;
     const nextType = conditions.length === 0 ? 'principal' : selectedDiagType;
     setConditions((prev) => [
@@ -234,15 +295,17 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
   };
 
   const handleRemoveCondition = (code: string) => {
+    if (!canEditClinicalAndSign) return;
     setConditions((prev) => prev.filter((c) => c.icd10_code !== code));
   };
 
   const handleAddMedication = (med: MedicationItem) => {
+    if (!canEditClinicalAndSign) return;
     setMedications((prev) => [...prev, med]);
   };
 
   const handleAddCustomMedication = () => {
-    if (!newMedName.trim()) return;
+    if (!canEditClinicalAndSign || !newMedName.trim()) return;
     setMedications((prev) => [
       ...prev,
       {
@@ -257,10 +320,86 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
   };
 
   const handleRemoveMedication = (idx: number) => {
+    if (!canEditClinicalAndSign) return;
     setMedications((prev) => prev.filter((_, i) => i !== idx));
   };
 
+  const handleSaveTriageOnly = async () => {
+    if (!triageCheck.allowed) {
+      setSaveBanner({
+        type: 'error',
+        message: triageCheck.errorMessage || 'ไม่มีสิทธิ์บันทึกการคัดกรอง',
+        missingRoles: triageCheck.missingRoles,
+      });
+      return;
+    }
+
+    setSaving(true);
+    setSaveBanner(null);
+    const encNumber = (activeEncounter as any)?.encounterNumber || activeEncounter?.id || 'ENC-2026-001';
+
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+      const res = await fetch('http://localhost:8000/api/v1/modules/doctor-opd/triage', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          encounter_number: encNumber.startsWith('ENC-') ? encNumber : 'ENC-2026-001',
+          patient_id: patient.id,
+          chief_complaint: chiefComplaint,
+          vital_signs: vitals,
+          priority: 'routine',
+        }),
+      });
+
+      if (res.ok) {
+        const saved = await res.json();
+        setSaveBanner({
+          type: 'success',
+          message: `บันทึกข้อมูลคัดกรองและสัญญาณชีพสำเร็จ (Triage by ${effectiveUser?.fullName || effectiveUser?.username})`,
+          encounterNumber: saved.encounter_number,
+        });
+        if (ctx?.emitEvent) {
+          ctx.emitEvent('opd:triage-saved', {
+            encounterNumber: saved.encounter_number,
+            chiefComplaint,
+            vitalSigns: vitals,
+            triagedBy: effectiveUser?.username,
+          });
+        }
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        const detail = errData.detail;
+        setSaveBanner({
+          type: 'error',
+          message: typeof detail === 'object' ? detail.message : detail || 'ไม่สามารถบันทึกข้อมูลคัดกรองได้',
+          missingRoles: typeof detail === 'object' ? detail.missing_roles : undefined,
+        });
+      }
+    } catch {
+      setSaveBanner({
+        type: 'error',
+        message: 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ Core API ได้',
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSaveConsultation = async () => {
+    if (!doctorSignCheck.allowed) {
+      setSaveBanner({
+        type: 'error',
+        message:
+          doctorSignCheck.errorMessage ||
+          'ปฏิเสธการบันทึก: บัญชีของคุณไม่มีสิทธิ์บันทึกเวชระเบียนหรือสั่งยาแทนแพทย์',
+        missingRoles: doctorSignCheck.missingRoles,
+      });
+      return;
+    }
+
     setSaving(true);
     setSaveBanner(null);
 
@@ -280,9 +419,12 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
     };
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
       const res = await fetch('http://localhost:8000/api/v1/modules/doctor-opd/encounters', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(payload),
       });
 
@@ -290,7 +432,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
         const saved = await res.json();
         setSaveBanner({
           type: 'success',
-          message: `บันทึกเวชระเบียนสำเร็จ (Encounter: ${saved.encounter_number}) • สร้างทรัพยากร HL7 FHIR R4 และส่งคำสั่งยาเข้าคิวห้องยาเรียบร้อยแล้ว`,
+          message: `ลงนามเวชระเบียนแพทย์สำเร็จ โดย ${effectiveUser?.fullName} (${effectiveUser?.licenseNumber || 'แพทย์'}) • Encounter: ${saved.encounter_number}`,
           encounterNumber: saved.encounter_number,
         });
         if (ctx?.emitEvent) {
@@ -299,6 +441,8 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             encounterNumber: saved.encounter_number,
             patientId: patient.id,
             hn: patient.hn,
+            signedBy: effectiveUser?.username,
+            licenseNumber: effectiveUser?.licenseNumber,
             chiefComplaint,
             vitalSigns: vitals,
             soapNote: soap,
@@ -306,33 +450,51 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             medications,
           });
         }
-        setSaving(false);
-        return;
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        const detail = errData.detail;
+        setSaveBanner({
+          type: 'error',
+          message:
+            typeof detail === 'object'
+              ? detail.message
+              : detail || 'ปฏิเสธการบันทึกเวชระเบียน (401/403)',
+          missingRoles: typeof detail === 'object' ? detail.missing_roles : undefined,
+        });
       }
     } catch {
-      // Fallback to client-side FHIR generation & Event Bus
-    }
-
-    setSaveBanner({
-      type: 'info',
-      message: `บันทึกข้อมูลการตรวจและแปลงเป็น HL7 FHIR R4 Clinical Bundle สำเร็จ (${conditions.length} ICD-10, ${medications.length} รายการยา)`,
-      encounterNumber: encNumber,
-    });
-    if (ctx?.emitEvent) {
-      ctx.emitEvent('opd:consultation-saved', {
-        encounterId: activeEncounter?.id || 'enc-2026-001',
-        encounterNumber: encNumber,
-        patientId: patient.id,
-        hn: patient.hn,
-        chiefComplaint,
-        vitalSigns: vitals,
-        soapNote: soap,
-        conditions,
-        medications,
+      setSaveBanner({
+        type: 'error',
+        message: 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ Core API เพื่อยืนยันสิทธิ์แพทย์ได้',
       });
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
+
+  if (!viewCheck.allowed && !readonly) {
+    return (
+      <div className="p-6 bg-red-50 border border-red-200 rounded-xl text-xs text-red-900 space-y-2">
+        <p className="font-bold text-sm">🚫 ปฏิเสธการเข้าถึงหน้าเวชระเบียนผู้ป่วยนอก (Access Denied)</p>
+        <p>{viewCheck.errorMessage}</p>
+        <div className="flex flex-wrap gap-1.5 pt-1">
+          <span className="font-semibold">รายการสิทธิ์ที่ต้องใช้ (Required Role List):</span>
+          {viewCheck.requiredRoles.map((r) => (
+            <span
+              key={r}
+              className={`font-mono px-2 py-0.5 rounded border ${
+                viewCheck.missingRoles.includes(r)
+                  ? 'bg-red-100 text-red-800 border-red-300 font-bold'
+                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+              }`}
+            >
+              {viewCheck.missingRoles.includes(r) ? `✗ ขาดสิทธิ์: ${r}` : `✓ มีสิทธิ์: ${r}`}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -347,44 +509,99 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
           </p>
         </div>
         <div className="flex items-center space-x-2">
-          <span className="text-[11px] bg-teal-50 text-teal-700 px-2.5 py-1 rounded-md border border-teal-200 font-medium">
-            ICD-10-TM & HL7 FHIR R4 Ready
-          </span>
+          {effectiveUser ? (
+            <span className="text-[11px] bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md border border-slate-300 font-medium">
+              ผู้ใช้งาน: <strong>{effectiveUser.fullName}</strong>{' '}
+              {effectiveUser.licenseNumber ? `(${effectiveUser.licenseNumber})` : ''}
+            </span>
+          ) : (
+            <span className="text-[11px] bg-red-50 text-red-700 px-2.5 py-1 rounded-md border border-red-200 font-bold">
+              ⚠️ โหมดไม่ได้เข้าสู่ระบบ (Read-Only)
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Save Notification Banner */}
-      {saveBanner && (
-        <div
-          className={`p-3.5 rounded-xl border text-xs flex items-center justify-between ${
-            saveBanner.type === 'success'
-              ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
-              : 'bg-teal-50 border-teal-300 text-teal-900'
-          }`}
-        >
-          <div className="flex items-center space-x-2">
-            <span className="text-base">✅</span>
-            <span className="font-semibold">{saveBanner.message}</span>
+      {/* Role-List Access Guard Notice when user cannot sign as Doctor */}
+      {!canEditClinicalAndSign && (
+        <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="font-bold">
+              🔒 โหมดป้องกันการบันทึกแทนแพทย์ (Strict Clinical Accountability Guard)
+            </span>
+            {readonly && (
+              <span className="bg-amber-200 text-amber-900 px-2 py-0.5 rounded font-mono text-[10px] font-bold">
+                HOST SHELL PREVIEW (READ-ONLY)
+              </span>
+            )}
           </div>
-          {saveBanner.encounterNumber && (
-            <a
-              href={`http://localhost:8000/fhir/r4/Encounter/${saveBanner.encounterNumber}/$everything`}
-              target="_blank"
-              rel="noreferrer"
-              className="underline font-mono font-bold text-teal-700 hover:text-teal-900 ml-3 whitespace-nowrap"
-            >
-              ดู FHIR $everything JSON ↗
-            </a>
+          <p>
+            ระบบไม่อนุญาตให้บันทึก SOAP Note, วินิจฉัยโรค ICD-10 หรือสั่งยาแทนแพทย์ หากบัญชีผู้ใช้งานไม่มีสิทธิ์ครบตามรายการที่กำหนด
+          </p>
+          {doctorSignCheck.missingRoles.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <span className="font-semibold text-red-700">
+                รายการสิทธิ์ที่ยังขาด (Missing Roles):
+              </span>
+              {doctorSignCheck.missingRoles.map((mr) => (
+                <span
+                  key={mr}
+                  className="font-mono font-bold bg-red-100 text-red-800 px-2 py-0.5 rounded border border-red-300 text-[11px]"
+                >
+                  {mr}
+                </span>
+              ))}
+            </div>
           )}
         </div>
       )}
 
-      {/* Section 1: Chief Complaint & Vital Signs */}
+      {/* Save / Error Notification Banner */}
+      {saveBanner && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs space-y-1 ${
+            saveBanner.type === 'success'
+              ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+              : saveBanner.type === 'error'
+              ? 'bg-red-50 border-red-300 text-red-900'
+              : 'bg-teal-50 border-teal-300 text-teal-900'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <span className="text-base">{saveBanner.type === 'error' ? '🚫' : '✅'}</span>
+              <span className="font-semibold">{saveBanner.message}</span>
+            </div>
+            {saveBanner.encounterNumber && (
+              <a
+                href={`http://localhost:8000/fhir/r4/Encounter/${saveBanner.encounterNumber}/$everything`}
+                target="_blank"
+                rel="noreferrer"
+                className="underline font-mono font-bold text-teal-700 hover:text-teal-900 ml-3 whitespace-nowrap"
+              >
+                ดู FHIR $everything JSON ↗
+              </a>
+            )}
+          </div>
+          {saveBanner.missingRoles && saveBanner.missingRoles.length > 0 && (
+            <p className="font-mono text-[11px] text-red-700 pl-6">
+              Missing Required Roles: [{saveBanner.missingRoles.join(', ')}]
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Section 1: Chief Complaint & Vital Signs (Editable with triage:write) */}
       <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-            1. อาการสำคัญแรกรับ (Chief Complaint) & สัญญาณชีพ (Vital Signs)
-          </h5>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center space-x-2">
+            <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+              1. อาการสำคัญแรกรับ (Chief Complaint) & สัญญาณชีพ (Vital Signs)
+            </h5>
+            <span className="text-[10px] font-mono bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded">
+              requires: [patient:read, triage:write]
+            </span>
+          </div>
           <span className="text-[11px] text-slate-500 font-mono">
             BMI: <strong className="text-teal-700">{bmi}</strong> kg/m²
           </span>
@@ -396,10 +613,10 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
           </label>
           <input
             type="text"
-            disabled={readonly}
+            disabled={!canEditTriage}
             value={chiefComplaint}
             onChange={(e) => setChiefComplaint(e.target.value)}
-            className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-teal-500"
+            className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-white disabled:bg-slate-100 focus:ring-1 focus:ring-teal-500"
           />
         </div>
 
@@ -409,7 +626,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             <div className="flex items-center space-x-1 mt-0.5">
               <input
                 type="number"
-                disabled={readonly}
+                disabled={!canEditTriage}
                 value={vitals.bp_systolic}
                 onChange={(e) => setVitals({ ...vitals, bp_systolic: Number(e.target.value) })}
                 className="w-12 text-xs font-bold text-slate-800 border-b border-slate-200 focus:outline-none"
@@ -417,7 +634,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
               <span className="text-slate-400">/</span>
               <input
                 type="number"
-                disabled={readonly}
+                disabled={!canEditTriage}
                 value={vitals.bp_diastolic}
                 onChange={(e) => setVitals({ ...vitals, bp_diastolic: Number(e.target.value) })}
                 className="w-12 text-xs font-bold text-slate-800 border-b border-slate-200 focus:outline-none"
@@ -429,7 +646,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             <span className="block text-[10px] text-slate-400 font-medium">Pulse (bpm)</span>
             <input
               type="number"
-              disabled={readonly}
+              disabled={!canEditTriage}
               value={vitals.pulse}
               onChange={(e) => setVitals({ ...vitals, pulse: Number(e.target.value) })}
               className="w-full text-xs font-bold text-slate-800 mt-0.5 border-b border-slate-200 focus:outline-none"
@@ -441,7 +658,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             <input
               type="number"
               step="0.1"
-              disabled={readonly}
+              disabled={!canEditTriage}
               value={vitals.temperature}
               onChange={(e) => setVitals({ ...vitals, temperature: Number(e.target.value) })}
               className={`w-full text-xs font-bold mt-0.5 border-b border-slate-200 focus:outline-none ${
@@ -454,7 +671,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             <span className="block text-[10px] text-slate-400 font-medium">RR (/min)</span>
             <input
               type="number"
-              disabled={readonly}
+              disabled={!canEditTriage}
               value={vitals.respiratory_rate}
               onChange={(e) => setVitals({ ...vitals, respiratory_rate: Number(e.target.value) })}
               className="w-full text-xs font-bold text-slate-800 mt-0.5 border-b border-slate-200 focus:outline-none"
@@ -465,7 +682,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             <span className="block text-[10px] text-slate-400 font-medium">SpO2 (%)</span>
             <input
               type="number"
-              disabled={readonly}
+              disabled={!canEditTriage}
               value={vitals.spo2}
               onChange={(e) => setVitals({ ...vitals, spo2: Number(e.target.value) })}
               className="w-full text-xs font-bold text-teal-700 mt-0.5 border-b border-slate-200 focus:outline-none"
@@ -477,7 +694,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             <input
               type="number"
               step="0.1"
-              disabled={readonly}
+              disabled={!canEditTriage}
               value={vitals.weight}
               onChange={(e) => setVitals({ ...vitals, weight: Number(e.target.value) })}
               className="w-full text-xs font-bold text-slate-800 mt-0.5 border-b border-slate-200 focus:outline-none"
@@ -489,30 +706,49 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             <input
               type="number"
               step="0.5"
-              disabled={readonly}
+              disabled={!canEditTriage}
               value={vitals.height}
               onChange={(e) => setVitals({ ...vitals, height: Number(e.target.value) })}
               className="w-full text-xs font-bold text-slate-800 mt-0.5 border-b border-slate-200 focus:outline-none"
             />
           </div>
         </div>
+
+        {/* If user can edit Triage (e.g. Nurse) but is NOT a Doctor, show dedicated Save Triage button */}
+        {canEditTriage && !canEditClinicalAndSign && (
+          <div className="pt-2 flex justify-end">
+            <button
+              type="button"
+              disabled={saving}
+              onClick={handleSaveTriageOnly}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow-sm"
+            >
+              {saving ? 'กำลังบันทึกคัดกรอง...' : '🩺 บันทึกเฉพาะข้อมูลคัดกรองและสัญญาณชีพ (Save Triage)'}
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Section 2: SOAP Note */}
+      {/* Section 2: SOAP Note (Requires encounter:sign) */}
       <div className="space-y-2">
-        <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-          2. บันทึกการตรวจรักษา (SOAP Clinical Notes)
-        </h5>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+            2. บันทึกการตรวจรักษาของแพทย์ (SOAP Clinical Notes)
+          </h5>
+          <span className="text-[10px] font-mono bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded">
+            requires: [encounter:read, encounter:sign]
+          </span>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
           <div className="space-y-1">
             <label className="text-xs font-semibold text-slate-700">
               S (Subjective) — ประวัติอาการเจ็บป่วยปัจจุบัน:
             </label>
             <textarea
-              disabled={readonly}
+              disabled={!canEditClinicalAndSign}
               value={soap.subjective}
               onChange={(e) => setSoap({ ...soap, subjective: e.target.value })}
-              className="w-full text-xs p-2.5 border border-slate-300 rounded-lg focus:ring-1 focus:ring-teal-500 min-h-[78px] bg-white"
+              className="w-full text-xs p-2.5 border border-slate-300 rounded-lg focus:ring-1 focus:ring-teal-500 min-h-[78px] bg-white disabled:bg-slate-100"
             />
           </div>
 
@@ -521,10 +757,10 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
               O (Objective) — ผลการตรวจร่างกาย & ผลตรวจทางห้องปฏิบัติการ:
             </label>
             <textarea
-              disabled={readonly}
+              disabled={!canEditClinicalAndSign}
               value={soap.objective}
               onChange={(e) => setSoap({ ...soap, objective: e.target.value })}
-              className="w-full text-xs p-2.5 border border-slate-300 rounded-lg focus:ring-1 focus:ring-teal-500 min-h-[78px] bg-white"
+              className="w-full text-xs p-2.5 border border-slate-300 rounded-lg focus:ring-1 focus:ring-teal-500 min-h-[78px] bg-white disabled:bg-slate-100"
             />
           </div>
 
@@ -533,10 +769,10 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
               A (Assessment) — สรุปการประเมินทางคลินิก:
             </label>
             <textarea
-              disabled={readonly}
+              disabled={!canEditClinicalAndSign}
               value={soap.assessment}
               onChange={(e) => setSoap({ ...soap, assessment: e.target.value })}
-              className="w-full text-xs p-2.5 border border-slate-300 rounded-lg focus:ring-1 focus:ring-teal-500 min-h-[78px] bg-white"
+              className="w-full text-xs p-2.5 border border-slate-300 rounded-lg focus:ring-1 focus:ring-teal-500 min-h-[78px] bg-white disabled:bg-slate-100"
             />
           </div>
 
@@ -545,25 +781,26 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
               P (Plan) — แผนการรักษาและคำแนะนำผู้ป่วย:
             </label>
             <textarea
-              disabled={readonly}
+              disabled={!canEditClinicalAndSign}
               value={soap.plan}
               onChange={(e) => setSoap({ ...soap, plan: e.target.value })}
-              className="w-full text-xs p-2.5 border border-slate-300 rounded-lg focus:ring-1 focus:ring-teal-500 min-h-[78px] bg-white"
+              className="w-full text-xs p-2.5 border border-slate-300 rounded-lg focus:ring-1 focus:ring-teal-500 min-h-[78px] bg-white disabled:bg-slate-100"
             />
           </div>
         </div>
       </div>
 
-      {/* Section 3: ICD-10 Diagnosis Coding */}
+      {/* Section 3: ICD-10 Diagnosis Coding (Requires condition:write) */}
       <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
             3. การวินิจฉัยโรคมาตรฐานสากล (ICD-10 Diagnosis / FHIR Condition)
           </h5>
-          <span className="text-[11px] text-slate-500">เลือกได้หลายรหัส (Principal / Comorbidity)</span>
+          <span className="text-[10px] font-mono bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded">
+            requires: [condition:read, condition:write]
+          </span>
         </div>
 
-        {/* Selected ICD-10 List */}
         <div className="space-y-1.5">
           {conditions.map((cond) => (
             <div
@@ -585,7 +822,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
                   {cond.diagnosis_type === 'principal' ? 'โรคหลัก (Principal)' : 'โรคร่วม (Comorbidity)'}
                 </span>
               </div>
-              {!readonly && (
+              {canEditClinicalAndSign && (
                 <button
                   type="button"
                   onClick={() => handleRemoveCondition(cond.icd10_code)}
@@ -598,15 +835,14 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
           ))}
         </div>
 
-        {/* ICD-10 Search Input */}
-        {!readonly && (
+        {canEditClinicalAndSign && (
           <div className="pt-1 space-y-2">
             <div className="flex flex-wrap gap-2">
               <input
                 type="text"
                 value={icdSearchQuery}
                 onChange={(e) => setIcdSearchQuery(e.target.value)}
-                placeholder="🔍 ค้นหารหัสโรค ICD-10 หรือชื่อโรค (เช่น J02.9, คออักเสบ, เบาหวาน, I10)..."
+                placeholder="🔍 ค้นหารหัสโรค ICD-10 จากฐานข้อมูลหลัก (เช่น J02.9, คออักเสบ, เบาหวาน, I10)..."
                 className="flex-1 min-w-[240px] text-xs px-3 py-2 border border-slate-300 rounded-lg bg-white"
               />
               <select
@@ -620,7 +856,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
             </div>
 
             <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-1">
-              {icdResults.slice(0, 8).map((item) => {
+              {icdResults.slice(0, 10).map((item) => {
                 const alreadyAdded = conditions.some((c) => c.icd10_code === item.code);
                 return (
                   <button
@@ -644,12 +880,17 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
         )}
       </div>
 
-      {/* Section 4: Outpatient Medication Orders */}
+      {/* Section 4: Outpatient Medication Orders (Requires medication:prescribe) */}
       <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-            4. รายการสั่งยาผู้ป่วยนอก (e-Prescription / FHIR MedicationRequest)
-          </h5>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center space-x-2">
+            <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+              4. รายการสั่งยาผู้ป่วยนอก (e-Prescription / FHIR MedicationRequest)
+            </h5>
+            <span className="text-[10px] font-mono bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded">
+              requires: [medication:read, medication:prescribe]
+            </span>
+          </div>
           {patient.allergies && patient.allergies.length > 0 && (
             <span className="text-[11px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded border border-red-200">
               ⚠️ ห้ามสั่งยากลุ่ม: {patient.allergies.join(', ')}
@@ -657,7 +898,6 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
           )}
         </div>
 
-        {/* Current Medication Table */}
         <div className="space-y-1.5">
           {medications.map((med, idx) => (
             <div
@@ -673,7 +913,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
                 </div>
                 <p className="text-[11px] text-slate-500">วิธีใช้: {med.dosage_instruction}</p>
               </div>
-              {!readonly && (
+              {canEditClinicalAndSign && (
                 <button
                   type="button"
                   onClick={() => handleRemoveMedication(idx)}
@@ -686,12 +926,13 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
           ))}
         </div>
 
-        {/* Quick-Add & Custom Drug Input */}
-        {!readonly && (
+        {canEditClinicalAndSign && (
           <div className="space-y-2 pt-1">
             <div className="flex flex-wrap gap-1.5 items-center">
-              <span className="text-[11px] text-slate-500 font-medium mr-1">สั่งยาด่วน:</span>
-              {QUICK_MEDICATIONS.map((qm) => (
+              <span className="text-[11px] text-slate-500 font-medium mr-1">
+                เลือกจากบัญชียาโรงพยาบาล (Formulary):
+              </span>
+              {formularyMeds.slice(0, 6).map((qm) => (
                 <button
                   key={qm.medication_code}
                   type="button"
@@ -708,7 +949,7 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
                 type="text"
                 value={newMedName}
                 onChange={(e) => setNewMedName(e.target.value)}
-                placeholder="ชื่อยาและขนาด (เช่น Amoxicillin 500 mg หรือ Loratadine 10 mg)"
+                placeholder="ชื่อยาและขนาด (เช่น Loratadine 10 mg)"
                 className="sm:col-span-4 text-xs px-3 py-1.5 border border-slate-300 rounded-lg bg-white"
               />
               <input
@@ -737,22 +978,24 @@ export const ConsultationTab: React.FC<PatientTabProps> = ({
         )}
       </div>
 
-      {/* Submit Action */}
-      {!readonly && (
-        <div className="pt-2 flex items-center justify-between">
-          <span className="text-[11px] text-slate-500">
-            การกดบันทึกจะสร้าง Audit Trail (PDPA) และแปลงเป็น HL7 FHIR R4 Bundle ทันที
-          </span>
-          <button
-            type="button"
-            disabled={saving}
-            onClick={handleSaveConsultation}
-            className="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-400 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors"
-          >
-            {saving ? 'กำลังบันทึกเวชระเบียน...' : '💾 บันทึกการตรวจและส่งคำสั่งยา (Sign & Send to Pharmacy)'}
-          </button>
-        </div>
-      )}
+      {/* Submit Action — Strictly guarded by REQUIRED_ROLES_DOCTOR_SIGN */}
+      <div className="pt-2 flex items-center justify-between flex-wrap gap-2">
+        <span className="text-[11px] text-slate-500">
+          การลงนามเวชระเบียนต้องใช้สิทธิ์ครบ: <code className="font-mono">[encounter:read, encounter:sign, condition:write, medication:prescribe]</code>
+        </span>
+        <button
+          type="button"
+          disabled={saving || !canEditClinicalAndSign}
+          onClick={handleSaveConsultation}
+          className="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg shadow-sm transition-colors"
+        >
+          {saving
+            ? 'กำลังลงนามและบันทึกเวชระเบียน...'
+            : canEditClinicalAndSign
+            ? `💾 ลงนามเวชระเบียนและส่งคำสั่งยา (${effectiveUser?.fullName})`
+            : '🔒 ปิดการบันทึก (เฉพาะแพทย์ที่มีสิทธิ์ครบตามรายการเท่านั้น)'}
+        </button>
+      </div>
     </div>
   );
 };

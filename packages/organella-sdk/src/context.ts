@@ -12,10 +12,39 @@ export interface OrganellaUser {
   permissions: string[];
 }
 
+export interface PermissionCheckResult {
+  allowed: boolean;
+  requiredRoles: string[];
+  missingRoles: string[];
+  errorMessage: string | null;
+}
+
+/**
+ * Checks access exclusively against a required list of granular permissions/roles.
+ * NEVER checks by Group name. Returns the exact list of missing permissions if any are absent.
+ */
+export function checkRequiredPermissions(
+  userPermissions: string[] | undefined,
+  requiredRoles: string[]
+): PermissionCheckResult {
+  const effectiveSet = new Set(userPermissions || []);
+  const missingRoles = requiredRoles.filter((req) => !effectiveSet.has(req));
+  const allowed = missingRoles.length === 0;
+  return {
+    allowed,
+    requiredRoles,
+    missingRoles,
+    errorMessage: allowed
+      ? null
+      : `ปฏิเสธการเข้าถึง (Access Denied): ขาดสิทธิ์ที่จำเป็น [${missingRoles.join(', ')}]`,
+  };
+}
+
 export interface OrganellaContextValue {
   patient: PatientDemographics;
   activeEncounter?: EncounterSummary;
   user?: OrganellaUser;
+  authToken?: string;
   activeModules: ModuleManifest[];
   activeWorkspaceTab: string;
   setActiveWorkspaceTab: (tabId: string) => void;
@@ -33,7 +62,10 @@ export function useOrganellaContext(): OrganellaContextValue {
   return context;
 }
 
-export function usePatient(): { patient: PatientDemographics; activeEncounter?: EncounterSummary } {
+export function usePatient(): {
+  patient: PatientDemographics;
+  activeEncounter?: EncounterSummary;
+} {
   const { patient, activeEncounter } = useOrganellaContext();
   return { patient, activeEncounter };
 }
