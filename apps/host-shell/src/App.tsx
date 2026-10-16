@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   EncounterSummary,
   ModuleManifest,
@@ -7,33 +7,69 @@ import {
   OrganellaUser,
   PatientDemographics,
 } from '@organella/sdk';
-import { toFHIRPatient } from '@organella/fhir-helpers';
+import {
+  toFHIRClinicalBundle,
+  ClinicalConditionInput,
+  ClinicalMedicationInput,
+} from '@organella/fhir-helpers';
 import { DynamicSlot } from './components/DynamicSlot';
 import { resolveSlotComponents } from './services/slotRegistry';
 import { SlotErrorBoundary } from './components/SlotErrorBoundary';
 
-// Default mock patient
+// Default patient synced with OPD Queue item #1
 const initialPatient: PatientDemographics = {
   id: 'pat-0001',
-  hn: '670001',
-  citizenId: '1-1002-00345-67-8',
+  hn: 'HN-2026-0001',
+  citizenId: '1100400239481',
   prefix: 'นาย',
-  firstName: 'สมศักดิ์',
-  lastName: 'มั่นคง',
+  firstName: 'สมชาย',
+  lastName: 'ใจดี',
   gender: 'male',
-  birthDate: '1985-05-12',
-  allergies: ['Penicillin G', 'Aspirin'],
-  bloodGroup: 'O Positive',
+  birthDate: '1978-05-14',
+  allergies: ['Penicillin (ผื่นลมพิษเฉียบพลัน)', 'Aspirin (หลอดลมตีบ)'],
+  bloodGroup: 'O+',
 };
 
-const initialEncounter: EncounterSummary = {
-  id: 'enc-2026-001',
+const initialEncounter: EncounterSummary & Record<string, any> = {
+  id: 'ENC-2026-001',
+  encounterNumber: 'ENC-2026-001',
   patientId: 'pat-0001',
   encounterType: 'OPD',
   status: 'in-progress',
-  startTime: '2026-10-15T08:30:00Z',
-  departmentId: 'dept-opd-med',
+  startTime: '2026-10-16T08:30:00Z',
+  departmentId: 'อายุรกรรมทั่วไป (OPD Med Rm.3)',
+  chiefComplaint: 'ไข้สูง เจ็บคอมาก กลืนลำบาก 2 วันก่อนมาโรงพยาบาล',
 };
+
+const initialConditions: ClinicalConditionInput[] = [
+  {
+    icd10Code: 'J02.9',
+    icd10Display: 'Acute pharyngitis, unspecified (คออักเสบเฉียบพลัน)',
+    diagnosisType: 'principal',
+  },
+  {
+    icd10Code: 'I10',
+    icd10Display: 'Essential (primary) hypertension (ความดันโลหิตสูงชนิดไม่ทราบสาเหตุ)',
+    diagnosisType: 'comorbidity',
+  },
+];
+
+const initialMedications: ClinicalMedicationInput[] = [
+  {
+    medicationCode: 'RX-PARA-500',
+    medicationName: 'Paracetamol 500 mg Tablet',
+    dosageInstruction: 'รับประทานครั้งละ 1 เม็ด ทุก 4-6 ชั่วโมง เวลาปวดหรือมีไข้',
+    quantity: 20,
+    unit: 'tablet',
+  },
+  {
+    medicationCode: 'RX-ROXI-150',
+    medicationName: 'Roxithromycin 150 mg Tablet (Safe for Penicillin Allergy)',
+    dosageInstruction: 'รับประทานครั้งละ 1 เม็ด วันละ 2 ครั้ง ก่อนอาหารเช้า-เย็น',
+    quantity: 14,
+    unit: 'tablet',
+  },
+];
 
 const currentUser: OrganellaUser = {
   id: 'usr-102',
@@ -42,7 +78,14 @@ const currentUser: OrganellaUser = {
   licenseNumber: 'ว.45892',
   department: 'OPD-MED',
   roles: ['Doctor'],
-  permissions: ['patient:read', 'patient:write', 'encounter:read', 'encounter:write'],
+  permissions: [
+    'patient:read',
+    'patient:write',
+    'encounter:read',
+    'encounter:write',
+    'condition:write',
+    'medication:write',
+  ],
 };
 
 // Fallback manifest if backend API is not responding
@@ -71,15 +114,19 @@ const fallbackDoctorOpdManifest: ModuleManifest = {
 };
 
 export function App() {
-  const [patient] = useState<PatientDemographics>(initialPatient);
-  const [encounter] = useState<EncounterSummary>(initialEncounter);
+  const [patient, setPatient] = useState<PatientDemographics>(initialPatient);
+  const [encounter, setEncounter] = useState<EncounterSummary & Record<string, any>>(
+    initialEncounter
+  );
+  const [conditions, setConditions] = useState<ClinicalConditionInput[]>(initialConditions);
+  const [medications, setMedications] = useState<ClinicalMedicationInput[]>(initialMedications);
   const [activeModules, setActiveModules] = useState<ModuleManifest[]>([fallbackDoctorOpdManifest]);
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<string>('doctor-opd');
   const [events, setEvents] = useState<Array<{ name: string; time: string; data: any }>>([]);
 
-  // Fetch active module manifests from Core API
+  // Fetch active module manifests and initial OPD queue from Core API
   useEffect(() => {
-    async function fetchManifests() {
+    async function initShell() {
       try {
         const res = await fetch('http://localhost:8000/api/v1/modules/active-manifests');
         if (res.ok) {
@@ -91,21 +138,125 @@ export function App() {
       } catch {
         // Fallback to initial local manifests
       }
+
+      try {
+        const qRes = await fetch('http://localhost:8000/api/v1/modules/doctor-opd/queue');
+        if (qRes.ok) {
+          const queue = await qRes.json();
+          if (Array.isArray(queue) && queue.length > 0) {
+            applyQueueItem(queue[0]);
+          }
+        }
+      } catch {
+        // Use initial patient state
+      }
     }
-    fetchManifests();
+    initShell();
   }, []);
 
-  // Event dispatcher functions
-  const emitEvent = (eventName: string, data: any) => {
-    setEvents((prev) => [
-      { name: eventName, time: new Date().toLocaleTimeString(), data },
-      ...prev.slice(0, 4),
-    ]);
+  const applyQueueItem = (item: any) => {
+    const parts = (item.patient_name || '').split(' ');
+    const prefix = parts.length >= 3 ? parts[0] : 'คุณ';
+    const firstName = parts.length >= 3 ? parts[1] : parts[0] || 'ผู้ป่วย';
+    const lastName = parts.length >= 3 ? parts.slice(2).join(' ') : parts[1] || '';
+
+    setPatient({
+      id: item.patient_id,
+      hn: item.hn,
+      citizenId: '1-1004-00239-48-1',
+      prefix,
+      firstName,
+      lastName,
+      gender: item.gender || 'male',
+      birthDate: item.birth_date || '1980-01-01',
+      allergies: item.allergies || [],
+      bloodGroup: item.blood_group || 'O+',
+    });
+
+    setEncounter({
+      id: item.encounter_number || item.encounter_id,
+      encounterNumber: item.encounter_number,
+      patientId: item.patient_id,
+      encounterType: 'OPD',
+      status: item.status || 'in-progress',
+      startTime: item.started_at || new Date().toISOString(),
+      departmentId: item.department || 'OPD-MED',
+      chiefComplaint: item.chief_complaint,
+      vitalSigns: item.vital_signs,
+      soapNote: item.soap_note,
+      conditions: item.conditions,
+      medications: item.medications,
+    });
+
+    if (Array.isArray(item.conditions)) {
+      setConditions(
+        item.conditions.map((c: any) => ({
+          id: c.id,
+          icd10Code: c.icd10_code,
+          icd10Display: c.icd10_display,
+          diagnosisType: c.diagnosis_type,
+        }))
+      );
+    }
+
+    if (Array.isArray(item.medications)) {
+      setMedications(
+        item.medications.map((m: any) => ({
+          id: m.id,
+          medicationCode: m.medication_code,
+          medicationName: m.medication_name,
+          dosageInstruction: m.dosage_instruction,
+          quantity: m.quantity,
+          unit: m.unit,
+        }))
+      );
+    }
   };
 
-  const onEvent = (_eventName: string, _handler: (data: any) => void) => {
+  // Event dispatcher functions
+  const emitEvent = useCallback((eventName: string, data: any) => {
+    setEvents((prev) => [
+      { name: eventName, time: new Date().toLocaleTimeString(), data },
+      ...prev.slice(0, 5),
+    ]);
+
+    if (eventName === 'opd:queue-selected' && data) {
+      applyQueueItem(data);
+    }
+
+    if (eventName === 'opd:consultation-saved' && data) {
+      setEncounter((prev) => ({
+        ...prev,
+        id: data.encounterNumber || prev.id,
+        status: 'finished',
+        chiefComplaint: data.chiefComplaint,
+      }));
+      if (Array.isArray(data.conditions)) {
+        setConditions(
+          data.conditions.map((c: any) => ({
+            icd10Code: c.icd10_code,
+            icd10Display: c.icd10_display,
+            diagnosisType: c.diagnosis_type,
+          }))
+        );
+      }
+      if (Array.isArray(data.medications)) {
+        setMedications(
+          data.medications.map((m: any) => ({
+            medicationCode: m.medication_code,
+            medicationName: m.medication_name,
+            dosageInstruction: m.dosage_instruction,
+            quantity: m.quantity,
+            unit: m.unit,
+          }))
+        );
+      }
+    }
+  }, []);
+
+  const onEvent = useCallback((_eventName: string, _handler: (data: any) => void) => {
     return () => {};
-  };
+  }, []);
 
   const contextValue: OrganellaContextValue = useMemo(
     () => ({
@@ -118,10 +269,27 @@ export function App() {
       emitEvent,
       onEvent,
     }),
-    [patient, encounter, activeModules, activeWorkspaceTab]
+    [patient, encounter, activeModules, activeWorkspaceTab, emitEvent, onEvent]
   );
 
-  const fhirPatient = toFHIRPatient(patient);
+  const fhirBundle = useMemo(
+    () =>
+      toFHIRClinicalBundle({
+        patient,
+        encounter: {
+          id: encounter.id,
+          encounterNumber: encounter.encounterNumber || encounter.id,
+          patientId: patient.id,
+          status: encounter.status,
+          department: encounter.departmentId || 'OPD-MED',
+          chiefComplaint: encounter.chiefComplaint,
+          startedAt: encounter.startTime,
+        },
+        conditions,
+        medications,
+      }),
+    [patient, encounter, conditions, medications]
+  );
 
   // Available Workspace Tabs from all active modules declaring patient-workspace-tab
   const workspaceTabs = resolveSlotComponents('patient-workspace-tab', activeModules);
@@ -139,11 +307,11 @@ export function App() {
               <div className="flex items-center space-x-2">
                 <h1 className="text-lg font-bold text-slate-900 leading-tight">Organella</h1>
                 <span className="text-[10px] font-semibold bg-teal-50 text-teal-700 px-2 py-0.5 rounded-full border border-teal-200">
-                  Micro-Frontend Shell (Phase 2)
+                  Clinical OPD & HL7 FHIR R4 (Phase 3)
                 </span>
               </div>
               <p className="text-xs text-slate-500">
-                Generic Health Engine & Dynamic Slot Registry
+                Generic Health Engine • Dynamic Slot Registry • Real-time FHIR R4 Bundle
               </p>
             </div>
           </div>
@@ -180,10 +348,13 @@ export function App() {
                   <span className="text-xs bg-amber-50 text-amber-700 px-2.5 py-1 rounded font-medium">
                     กรุ๊ปเลือด: {patient.bloodGroup}
                   </span>
+                  <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded font-mono font-semibold border border-emerald-200">
+                    Visit: {encounter.id} ({encounter.status})
+                  </span>
                 </div>
                 <p className="text-xs text-slate-500">
-                  เลขบัตรประชาชน: {patient.citizenId} | วันเกิด: {patient.birthDate} | รหัส Visit:{' '}
-                  {encounter.id} ({encounter.encounterType})
+                  เลขบัตรประชาชน: {patient.citizenId} | วันเกิด: {patient.birthDate} | แผนก:{' '}
+                  {encounter.departmentId}
                 </p>
               </div>
 
@@ -196,7 +367,7 @@ export function App() {
             {patient.allergies && patient.allergies.length > 0 && (
               <div className="mt-3 pt-3 border-t border-slate-100 flex items-center space-x-2">
                 <span className="text-xs font-bold text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 rounded">
-                  ⚠️ ประวัติแพ้ยา:
+                  ⚠️ ประวัติแพ้ยาสำคัญ:
                 </span>
                 <span className="text-xs text-red-700 font-semibold">
                   {patient.allergies.join(', ')}
@@ -226,7 +397,9 @@ export function App() {
                     </button>
                   ))}
                   {workspaceTabs.length === 0 && (
-                    <span className="text-xs text-slate-400 py-2">ไม่มีโมดูลเวิร์กสเปซที่เปิดใช้งาน</span>
+                    <span className="text-xs text-slate-400 py-2">
+                      ไม่มีโมดูลเวิร์กสเปซที่เปิดใช้งาน
+                    </span>
                   )}
                 </div>
 
@@ -256,10 +429,12 @@ export function App() {
               {/* Event Bus Log Window */}
               {events.length > 0 && (
                 <div className="bg-slate-900 text-slate-200 p-4 rounded-xl shadow-sm text-xs font-mono">
-                  <p className="text-teal-400 font-bold mb-1">📡 Client-Side Event Bus Activity:</p>
+                  <p className="text-teal-400 font-bold mb-1">
+                    📡 Client-Side & Redis Event Bus Activity:
+                  </p>
                   <ul className="space-y-1">
                     {events.map((e, i) => (
-                      <li key={i}>
+                      <li key={i} className="truncate">
                         <span className="text-slate-400">[{e.time}]</span>{' '}
                         <span className="text-amber-400 font-semibold">{e.name}:</span>{' '}
                         {JSON.stringify(e.data)}
@@ -275,7 +450,7 @@ export function App() {
               {/* Dashboard Widgets Slot */}
               <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
                 <div className="border-b border-slate-100 pb-2 mb-3 flex items-center justify-between">
-                  <h3 className="font-bold text-slate-800 text-sm">Dashboard Widgets (Slot)</h3>
+                  <h3 className="font-bold text-slate-800 text-sm">คิวรอตรวจ (คลิกเพื่อสลับผู้ป่วย)</h3>
                   <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded font-mono">
                     slot: dashboard-widget
                   </span>
@@ -286,13 +461,19 @@ export function App() {
               {/* HL7 FHIR Live Interoperability Output */}
               <div className="bg-slate-900 text-slate-200 rounded-xl p-5 shadow-sm font-mono text-xs overflow-x-auto">
                 <div className="flex items-center justify-between mb-2">
-                  <p className="text-teal-400 font-bold">⚡ HL7 FHIR R4 Patient Adapter</p>
+                  <div>
+                    <p className="text-teal-400 font-bold">⚡ HL7 FHIR R4 Clinical Bundle</p>
+                    <p className="text-[10px] text-slate-400">
+                      Patient + Encounter + {conditions.length} Condition + {medications.length}{' '}
+                      MedicationRequest
+                    </p>
+                  </div>
                   <span className="text-[10px] bg-teal-900/50 text-teal-300 px-2 py-0.5 rounded border border-teal-700">
-                    fhir.resources R4
+                    $everything
                   </span>
                 </div>
-                <pre className="text-slate-300 max-h-60 overflow-y-auto">
-                  {JSON.stringify(fhirPatient, null, 2)}
+                <pre className="text-slate-300 max-h-80 overflow-y-auto text-[11px]">
+                  {JSON.stringify(fhirBundle, null, 2)}
                 </pre>
               </div>
             </div>

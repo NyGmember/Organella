@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from organella_core.api.v1.auth import router as auth_router
+from organella_core.api.v1.doctor_opd import router as doctor_opd_router
 from organella_core.api.v1.fhir import router as fhir_router
 from organella_core.api.v1.modules import router as modules_router
 from organella_core.api.v1.patients import router as patients_router
@@ -29,6 +30,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(patients_router, prefix="/api/v1")
 app.include_router(modules_router, prefix="/api/v1")
+app.include_router(doctor_opd_router, prefix="/api/v1")
 app.include_router(fhir_router)
 
 

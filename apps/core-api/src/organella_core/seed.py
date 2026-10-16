@@ -112,6 +112,10 @@ async def seed_database():
             print("  + Added User: dr.thanakorn (password: doctor12345)")
 
         await db.commit()
+        from organella_core.api.v1.doctor_opd import ensure_sample_opd_queue
+
+        await ensure_sample_opd_queue(db)
+        print("  + Seeded Sample OPD Patients, Queue, SOAP Notes, ICD-10 & Prescriptions")
         print("[Organella Seed] Database seeding completed successfully!")
 
 
